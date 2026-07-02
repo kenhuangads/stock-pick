@@ -22,9 +22,10 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import twstock
 from indicators import build_market
-from strategies import screen, evaluate, STRATEGIES, DEFAULT_WEIGHT
+from strategies import screen, evaluate, STRATEGIES, default_weight
 from review import run_review
 from optimize import run_optimize
+from price_opt import run_price_opt
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -49,16 +50,20 @@ def load_config():
 
 
 def weights_from_doc(doc):
-    if not doc:
-        return {s["id"]: DEFAULT_WEIGHT for s in STRATEGIES}
-    return {sid: st.get("weight", DEFAULT_WEIGHT) for sid, st in doc.get("stats", {}).items()}
+    """由 strategies.json 還原權重；缺漏的策略（例如剛加入的候選）補預設值。"""
+    weights = {s["id"]: default_weight(s) for s in STRATEGIES}
+    for sid, st in (doc or {}).get("stats", {}).items():
+        if sid in weights:
+            weights[sid] = st.get("weight", weights[sid])
+    return weights
 
 
-def generate_outputs(snapshots, cfg, reviews, strat_doc):
-    """由（時間排序的）快照序列產生 market/picks/strategies 輸出。"""
+def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc):
+    """由（時間排序的）快照序列產生 market/picks/strategies/price_model 輸出。"""
     latest_date, market = build_market(snapshots)
     weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
-    picks = screen(market, cfg, weights)
+    shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
+    picks = screen(market, cfg, weights, shifts)
     for m in market.values():  # 供前端自訂選股使用的個股觸發標記
         score, hits = evaluate(m, weights)
         m["score"], m["strategies"] = score, hits
@@ -66,6 +71,7 @@ def generate_outputs(snapshots, cfg, reviews, strat_doc):
         "generated_on": latest_date,
         "generated_at": datetime.now(TAIPEI).isoformat(timespec="seconds"),
         "weights_used": weights,
+        "price_shifts": shifts,
         "note": "建議單適用於 generated_on 之後的下一個交易日",
         "picks": picks,
     }
@@ -73,10 +79,11 @@ def generate_outputs(snapshots, cfg, reviews, strat_doc):
         "date": latest_date,
         "updated_at": datetime.now(TAIPEI).isoformat(timespec="seconds"),
         "count": len(market),
-        "strategies": [{"id": s["id"], "name": s["name"], "desc": s["desc"]} for s in STRATEGIES],
+        "strategies": [{"id": s["id"], "name": s["name"], "desc": s["desc"],
+                        "candidate": s.get("candidate", False)} for s in STRATEGIES],
         "stocks": sorted(market.values(), key=lambda m: -m["val"]),
     }
-    return market_doc, picks_doc, strat_doc
+    return market_doc, picks_doc, strat_doc, price_doc
 
 
 def do_review_if_due(cfg, reviews, snapshots_by_date):
@@ -102,23 +109,24 @@ def do_review_if_due(cfg, reviews, snapshots_by_date):
 
 def rebuild_walkforward(cfg):
     """由 history 全量重建：每天只用「當天以前」的資料選股，再用隔天實際行情復盤。
-    嚴格 walk-forward，權重沿路演化，和真實每日執行的結果一致。"""
+    嚴格 walk-forward，策略權重與價格偏移沿路演化，和真實每日執行的結果一致。"""
     snaps = twstock.load_snapshots()
     min_days = cfg.get("min_history_days", 22)
     if len(snaps) <= min_days:
         print(f"[rebuild] 歷史僅 {len(snaps)} 天，不足 {min_days}+1 天，略過")
-        return [], None
-    reviews, strat_doc = [], None
+        return [], None, None
+    reviews, strat_doc, price_doc = [], None, None
     for i in range(min_days, len(snaps)):
         upto = snaps[: i]                      # 只看 i-1 為止的資料
         latest_date, market = build_market(upto)
         weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
-        picks = screen(market, cfg, weights)
+        shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
+        picks = screen(market, cfg, weights, shifts)
         picks_doc = {"generated_on": latest_date, "picks": picks}
         entry = run_review(picks_doc, snaps[i], cfg)   # 用第 i 天實際行情驗證
         reviews.append(entry)
     print(f"[rebuild] walk-forward 完成：{len(reviews)} 個復盤日")
-    return reviews, strat_doc
+    return reviews, strat_doc, price_doc
 
 
 def prune_history(keep):
@@ -162,10 +170,11 @@ def main():
         sys.exit(1)
 
     if "--rebuild" in args:
-        reviews, strat_doc = rebuild_walkforward(cfg)
+        reviews, strat_doc, price_doc = rebuild_walkforward(cfg)
     else:
         reviews = load_json(DATA / "reviews.json", [])
         strat_doc = load_json(LATEST / "strategies.json", None)
+        price_doc = load_json(LATEST / "price_model.json", None)
         snapshots_by_date = {s["date"]: s for s in snaps}
         reviews, reviewed = do_review_if_due(cfg, reviews, snapshots_by_date)
         new_data = new_data or reviewed
@@ -173,12 +182,14 @@ def main():
             print("[skip] 無新交易日資料與新復盤（休市或已更新過），不重寫輸出")
             return
 
-    market_doc, picks_doc, strat_doc = generate_outputs(snaps, cfg, reviews, strat_doc)
+    market_doc, picks_doc, strat_doc, price_doc = generate_outputs(snaps, cfg, reviews, strat_doc, price_doc)
 
     save_json(DATA / "reviews.json", reviews)
     save_json(LATEST / "market.json", market_doc)
     save_json(LATEST / "picks.json", picks_doc)
     save_json(LATEST / "strategies.json", strat_doc)
+    if price_doc:
+        save_json(LATEST / "price_model.json", price_doc)
     save_json(LATEST / "config_snapshot.json", cfg)
     prune_history(cfg.get("history_window", 60))
     print(f"[done] {market_doc['date']}：市場 {market_doc['count']} 檔、"

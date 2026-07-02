@@ -26,8 +26,8 @@ function tradeNet(fill, exit, lots) {
 }
 
 /* ---------- 資料載入 ---------- */
-let DB = { picks: null, market: null, reviews: null, strategies: null };
-let stratMeta = {}; // id -> {name, desc}
+let DB = { picks: null, market: null, reviews: null, strategies: null, priceModel: null };
+let stratMeta = {}; // id -> {name, desc, candidate}
 
 async function loadJSON(path) {
   const r = await fetch(`${path}?t=${Date.now()}`);
@@ -43,13 +43,15 @@ async function boot() {
       loadJSON("data/reviews.json"),
       loadJSON("data/latest/strategies.json"),
     ]);
-    DB = { picks, market, reviews, strategies };
+    const priceModel = await loadJSON("data/latest/price_model.json").catch(() => null); // 舊部署可能還沒有
+    DB = { picks, market, reviews, strategies, priceModel };
     (market.strategies || []).forEach((s) => (stratMeta[s.id] = s));
     Object.entries(strategies.meta || {}).forEach(([id, m]) => (stratMeta[id] = { id, ...m }));
     $("#dataDate").textContent = `資料日：${market.date} · 更新：${(market.updated_at || "").slice(0, 16).replace("T", " ")}`;
     renderPicks();
     initCustomForm();
     renderReview();
+    renderPriceModel();
     renderStrategies();
   } catch (e) {
     $("#dataDate").textContent = "資料載入失敗";
@@ -105,12 +107,17 @@ function stockCard(p, rank) {
 }
 
 /* ---------- Tab 1 今日選股 ---------- */
+const shiftTxt = (v) => (v > 0 ? `+${v}` : `${v}`) + "R";
 function renderPicks() {
   const d = DB.picks;
   const n = d.picks?.length || 0;
+  const sh = d.price_shifts || {};
+  const shifted = ["entry", "target", "stop"].some((k) => sh[k]);
   $("#picksInfo").innerHTML = n
     ? `📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔
-       <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。`
+       <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。${shifted
+        ? `<br>📐 建議價已套用價格模型偏移（進場 ${shiftTxt(sh.entry)}、停利 ${shiftTxt(sh.target)}、停損 ${shiftTxt(sh.stop)}，依復盤自動迭代，詳見「每日復盤」頁）。`
+        : ""}`
     : `本日基礎濾網後沒有符合門檻的標的（或歷史資料尚在累積）。可到「自訂選股」放寬條件。`;
   $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
@@ -271,13 +278,36 @@ function renderReview() {
   }).join("");
 }
 
+/* ---------- 價格模型（每日復盤頁）---------- */
+function renderPriceModel() {
+  const pm = DB.priceModel;
+  if (!pm || !pm.stats) return; // 尚未產生價格模型 → 區塊保持隱藏
+  const s = pm.stats, sh = pm.shifts || {};
+  $("#priceModelCard").hidden = false;
+  $("#priceModelInfo").innerHTML =
+    `進出場建議價＝CDP 基準價＋偏移 ×「訊號日振幅 R」，偏移每日依最近 <b>${pm.window_days}</b> 個復盤日重放搜尋、
+     績效明顯改善才切換（防止雜訊抖動）。目前偏移：進場 <b>${shiftTxt(sh.entry ?? 0)}</b> ·
+     停利 <b>${shiftTxt(sh.target ?? 0)}</b> · 停損 <b>${shiftTxt(sh.stop ?? 0)}</b>
+     ${s.net != null && s.net_baseline != null ? `｜窗口淨損益 <b>${fmt(s.net)}</b> vs 原始 CDP <b>${fmt(s.net_baseline)}</b> 元` : ""}`;
+  $("#priceModelStats").innerHTML = `
+    <div class="stat"><div class="lb">掛單成交率</div><div class="v">${s.fill_rate ?? "–"}%</div></div>
+    <div class="stat"><div class="lb">停利出場占比</div><div class="v up">${s.target_rate ?? "–"}%</div></div>
+    <div class="stat"><div class="lb">停損出場占比</div><div class="v down">${s.stop_rate ?? "–"}%</div></div>
+    <div class="stat"><div class="lb">掛價過低錯失率</div><div class="v">${s.runaway_rate ?? "–"}%</div></div>`;
+  const log = pm.log || [];
+  $("#priceModelLog").innerHTML = log.length
+    ? [...log].reverse().slice(0, 10).map((l) => `<div class="log-item"><span class="d">${l.date}</span>${l.msg}</div>`).join("")
+    : "尚無調整紀錄（樣本累積中，窗口成交滿門檻後開始搜尋）";
+}
+
 /* ---------- Tab 4 策略績效 ---------- */
 let stratChart;
 function renderStrategies() {
   const d = DB.strategies;
   const stats = d.stats || {};
   $("#stratInfo").innerHTML = `評估窗口：最近 <b>${d.window_days}</b> 個復盤日（累計 ${d.review_days} 日） ·
-    每日收盤後自動重算：期望值轉負的策略停用（汰弱），績效好的策略加權（留強），直接影響隔日「今日選股」排序。`;
+    每日收盤後自動重算：期望值轉負的策略停用（汰弱），績效好的策略加權（留強），直接影響隔日「今日選股」排序。
+    <br>🧪 <b>候選策略池</b>：新策略以權重 0 虛擬追蹤（觸發照記、不計分），樣本足夠且期望值實證轉正才自動納入計分；轉負會退回觀察區。`;
   const list = Object.entries(stats)
     .map(([id, s]) => ({ id, name: stratMeta[id]?.name || id, desc: stratMeta[id]?.desc || "", ...s }))
     .sort((a, b) => (b.weight || 0) - (a.weight || 0) || (b.win_rate || 0) - (a.win_rate || 0));
@@ -304,7 +334,8 @@ function renderStrategies() {
 
   $("#stratList").innerHTML = list.map((s) => `<div class="card s-card">
     <div class="s-head"><span class="s-name">${s.name}</span>
-      <span class="badge ${s.enabled ? "on" : "off"}">${s.enabled ? "啟用中" : "已停用"}</span>
+      ${s.candidate ? `<span class="badge cand" title="候選策略：虛擬追蹤，實證有效自動轉正">候選</span>` : ""}
+      <span class="badge ${s.enabled ? "on" : "off"}">${s.enabled ? "啟用中" : s.candidate ? "觀察中" : "已停用"}</span>
       <span class="badge w">權重 ${s.weight}</span></div>
     <div class="s-desc">${s.desc}</div>
     <div class="bar"><i style="width:${Math.min(s.win_rate || 0, 100)}%"></i></div>

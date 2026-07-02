@@ -58,6 +58,15 @@ def compute_stock_metrics(series):
     vol_ma5_incl = sma(vols, 5)
     val_ma5 = sma(vals, 5)
 
+    # 候選策略用指標：K 棒形態、布林上軌、連漲量增
+    rng = today["h"] - today["l"]
+    body_ratio = (today["c"] - today["o"]) / rng if rng else 0.0   # 紅K實體佔振幅比（負=收黑）
+    close_pos = (today["c"] - today["l"]) / rng if rng else 0.0    # 收盤位於當日區間位置（1=收最高）
+    var20 = sum((c - ma20) ** 2 for c in closes[-20:]) / 20
+    boll_up = ma20 + 2 * (var20 ** 0.5)
+    up3 = len(closes) >= 4 and closes[-1] > closes[-2] > closes[-3] > closes[-4]
+    vol_nofade = len(vols) >= 2 and vols[-1] >= vols[-2]
+
     amp_win = series[-30:] if len(series) >= 30 else series[-20:]
     amps = [(k["h"] - k["l"]) / k["o"] * 100 for k in amp_win if k["o"]]
     amp_avg = sum(amps) / len(amps) if amps else 0.0
@@ -88,6 +97,9 @@ def compute_stock_metrics(series):
         "amp_avg": round(amp_avg, 2),
         "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2),
         "high20": high20,
+        "prev_high": prev["h"], "prev_close": prev["c"],
+        "body_ratio": round(body_ratio, 2), "close_pos": round(close_pos, 2),
+        "boll_up": round(boll_up, 2), "up3": up3, "vol_nofade": vol_nofade,
         "dt_ratio": round(dt_ratio, 1) if dt_ratio is not None else None,
         "dt_ratio_ma5": round(dt_ratio_ma5, 1) if dt_ratio_ma5 is not None else None,
         "turnover": round(turnover, 2) if turnover is not None else None,

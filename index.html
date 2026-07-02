@@ -90,6 +90,12 @@
     <div class="chart-card"><canvas id="pnlChart"></canvas></div>
     <div class="notice small">模擬規則：隔日以建議價掛限價買單（最低價 ≤ 掛價才視為成交、開盤更低以開盤價成交）；
     出場採<b>保守假設</b>——先檢查停損、再停利、皆未觸及以收盤價沖銷。損益已含手續費（依你設定的折數）與當沖證交稅 0.15%。</div>
+    <div class="log-card" id="priceModelCard" hidden>
+      <h3>📐 價格模型（進出場價迭代）</h3>
+      <div class="notice small" id="priceModelInfo"></div>
+      <div class="stat-row" id="priceModelStats"></div>
+      <div id="priceModelLog" class="muted small"></div>
+    </div>
     <div id="reviewList"></div>
   </section>
 

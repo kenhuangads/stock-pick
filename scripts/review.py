@@ -26,6 +26,8 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1):
         "code": pick["code"], "name": pick["name"], "market": pick.get("market"),
         "score": pick["score"], "strategies": pick["strategies"],
         "entry": pick["entry"], "target": pick["target"], "stop": pick["stop"],
+        "cdp_base": pick.get("cdp_base"),  # 原始 CDP 價位與當日振幅，供價格模型重放迭代
+
         "day_open": ohlc["o"], "day_high": ohlc["h"], "day_low": ohlc["l"], "day_close": ohlc["c"],
         "filled": False, "fill_price": None, "exit_price": None, "exit_reason": None,
         "gross": 0, "fees": 0, "net": 0, "ret_pct": None,
