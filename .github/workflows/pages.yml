@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false   # 排隊而非取消：互相取消曾造成服務端殭屍部署、全部部署失敗
 
 jobs:
   deploy:
