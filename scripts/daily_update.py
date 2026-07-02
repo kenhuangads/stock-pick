@@ -26,6 +26,7 @@ from strategies import screen, evaluate, STRATEGIES, default_weight
 from review import run_review
 from optimize import run_optimize
 from price_opt import run_price_opt
+from intraday import ensure_intraday, load_intraday
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -86,8 +87,8 @@ def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc):
     return market_doc, picks_doc, strat_doc, price_doc
 
 
-def do_review_if_due(cfg, reviews, snapshots_by_date):
-    """把尚未復盤的建議單，對「產生日之後第一個交易日」執行模擬。"""
+def do_review_if_due(cfg, reviews, snapshots_by_date, allow_fetch=True):
+    """把尚未復盤的建議單，對「產生日之後第一個交易日」執行模擬（5分K核實順序）。"""
     picks_doc = load_json(LATEST / "picks.json", None)
     if not picks_doc or not picks_doc.get("picks"):
         return reviews, False
@@ -99,17 +100,21 @@ def do_review_if_due(cfg, reviews, snapshots_by_date):
     trade_date = later[0]
     if trade_date in reviewed_dates:
         return reviews, False
-    entry = run_review(picks_doc, snapshots_by_date[trade_date], cfg)
+    bars = (ensure_intraday(trade_date, picks_doc["picks"]) if allow_fetch
+            else load_intraday(trade_date))
+    entry = run_review(picks_doc, snapshots_by_date[trade_date], cfg, bars)
     reviews.append(entry)
     reviews.sort(key=lambda r: r["date"])
+    s = entry["summary"]
     print(f"[review] {gen} 的建議單以 {trade_date} 實際行情復盤："
-          f"成交 {entry['summary']['n_filled']} 筆、淨損益 {entry['summary']['net']} 元")
+          f"成交 {s['n_filled']} 筆、淨損益 {s['net']} 元（5分K核實 {s['n_intraday']}/{s['n_picks']}）")
     return reviews, True
 
 
-def rebuild_walkforward(cfg):
+def rebuild_walkforward(cfg, allow_fetch=True):
     """由 history 全量重建：每天只用「當天以前」的資料選股，再用隔天實際行情復盤。
-    嚴格 walk-forward，策略權重與價格偏移沿路演化，和真實每日執行的結果一致。"""
+    嚴格 walk-forward，策略權重與價格偏移沿路演化，和真實每日執行的結果一致。
+    復盤優先用 5 分K核實順序（缺檔時線上補抓；Yahoo 約可回溯 60 天）。"""
     snaps = twstock.load_snapshots()
     min_days = cfg.get("min_history_days", 22)
     if len(snaps) <= min_days:
@@ -123,9 +128,14 @@ def rebuild_walkforward(cfg):
         shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
         picks = screen(market, cfg, weights, shifts)
         picks_doc = {"generated_on": latest_date, "picks": picks}
-        entry = run_review(picks_doc, snaps[i], cfg)   # 用第 i 天實際行情驗證
+        trade_date = snaps[i]["date"]
+        bars = (ensure_intraday(trade_date, picks) if allow_fetch
+                else load_intraday(trade_date))
+        entry = run_review(picks_doc, snaps[i], cfg, bars)   # 用第 i 天實際行情驗證
         reviews.append(entry)
-    print(f"[rebuild] walk-forward 完成：{len(reviews)} 個復盤日")
+    n_intra = sum(r["summary"].get("n_intraday", 0) for r in reviews)
+    n_all = sum(r["summary"]["n_picks"] for r in reviews)
+    print(f"[rebuild] walk-forward 完成:{len(reviews)} 個復盤日（5分K核實 {n_intra}/{n_all} 筆）")
     return reviews, strat_doc, price_doc
 
 
@@ -169,14 +179,15 @@ def main():
         print(f"[error] 歷史資料僅 {len(snaps)} 天，請先執行 scripts/backfill.py")
         sys.exit(1)
 
+    allow_fetch = "--offline" not in args
     if "--rebuild" in args:
-        reviews, strat_doc, price_doc = rebuild_walkforward(cfg)
+        reviews, strat_doc, price_doc = rebuild_walkforward(cfg, allow_fetch)
     else:
         reviews = load_json(DATA / "reviews.json", [])
         strat_doc = load_json(LATEST / "strategies.json", None)
         price_doc = load_json(LATEST / "price_model.json", None)
         snapshots_by_date = {s["date"]: s for s in snaps}
-        reviews, reviewed = do_review_if_due(cfg, reviews, snapshots_by_date)
+        reviews, reviewed = do_review_if_due(cfg, reviews, snapshots_by_date, allow_fetch)
         new_data = new_data or reviewed
         if not new_data and "--force" not in args and "--offline" not in args:
             print("[skip] 無新交易日資料與新復盤（休市或已更新過），不重寫輸出")

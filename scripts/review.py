@@ -1,13 +1,23 @@
-"""每日復盤：用實際 OHLC 檢驗前一交易日收盤後產生的建議單。
+"""每日復盤：用實際行情檢驗前一交易日收盤後產生的建議單。
 
-模擬假設（保守原則，全部寫進 README）：
-- 限價買單掛 entry（CDP NL）：當日最低價 ≤ entry 才視為成交；
-  若開盤價低於 entry，以開盤價成交（限價單的實際行為）。
-- 出場優先序（悲觀排序）：先檢查停損（最低 ≤ stop → 以 stop 出場），
-  再檢查停利（最高 ≥ target → 以 target 出場），皆未觸及 → 收盤價沖銷。
-  OHLC 無法得知日內先後順序，一律採最壞情境，避免高估策略績效。
-- 現股當沖稅率 0.15%（賣出時課徵）、手續費 0.1425% × 折扣，買賣各一次，
-  單邊手續費低於最低手續費時以最低手續費計。
+模擬有兩種模式（同一套進出場規則，粒度不同）：
+
+【intraday｜5 分K 順序模擬（優先）】
+- 逐根走 5 分K：第一根「最低 ≤ 掛買價」的 bar 視為成交
+  （該根開盤已低於掛價 → 以該根開盤價成交，否則以掛價成交）。
+- 成交那一根：**不認停利**（同根內的高點可能發生在成交之前，吃不到），
+  但認停損（既然殺到掛價，續殺到停損的機率高，保守處理）。
+- 成交之後的每一根：先檢查停損（低 ≤ stop）、再檢查停利（高 ≥ target），
+  皆未觸及走到收盤 → 以日K收盤價沖銷。
+- 這修正了日K模擬的「順序偏誤」——先衝高觸停利、之後才回落到掛買價的單，
+  日K會誤記成吃得到的停利，5 分K 能還原真實順序。
+
+【daily｜日K保守模擬（無 5 分K資料時 fallback）】
+- 最低 ≤ 掛價視為成交（開盤更低以開盤價成交）。
+- 出場悲觀排序：先停損、再停利、皆未觸及以收盤沖銷。
+
+費用：現股當沖稅 0.15%（賣出課徵）、手續費 0.1425% × 折扣，買賣各一次，
+單邊低於最低手續費以最低計。
 """
 
 
@@ -20,31 +30,56 @@ def trade_fees(buy_price, sell_price, lots, fees_cfg, discount=None):
     return fee_buy, fee_sell, tax
 
 
-def simulate_pick(pick, ohlc, fees_cfg, lots=1):
-    """回傳含成交/出場/損益的復盤紀錄。ohlc: 交易日的 {o,h,l,c}。"""
+def simulate_trade(entry, target, stop, ohlc, bars=None):
+    """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
+    回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
+    ohlc: {o,h,l,c} 日K；bars: [[o,h,l,c],...] 5分K（可 None）。"""
+    if bars:
+        fill = None
+        for i, (bo, bh, bl, bc) in enumerate(bars):
+            if fill is None:
+                if bl <= entry:
+                    fill = min(entry, bo)
+                    if bl <= stop and fill > stop:
+                        return True, fill, stop, "stop", "intraday"
+                continue
+            if bl <= stop:
+                return True, fill, stop, "stop", "intraday"
+            if bh >= target:
+                return True, fill, target, "target", "intraday"
+        if fill is None:
+            return False, None, None, "nofill", "intraday"
+        return True, fill, ohlc["c"], "close", "intraday"
+
+    # fallback：日K保守規則（順序未知，悲觀假設）
+    if ohlc["l"] > entry:
+        return False, None, None, "nofill", "daily"
+    fill = min(entry, ohlc["o"])
+    if ohlc["l"] <= stop and fill > stop:
+        return True, fill, stop, "stop", "daily"
+    if ohlc["h"] >= target:
+        return True, fill, target, "target", "daily"
+    return True, fill, ohlc["c"], "close", "daily"
+
+
+def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None):
+    """回傳含成交/出場/損益的復盤紀錄。ohlc: 交易日的 {o,h,l,c}；bars: 當日 5 分K。"""
     r = {
         "code": pick["code"], "name": pick["name"], "market": pick.get("market"),
         "score": pick["score"], "strategies": pick["strategies"],
         "entry": pick["entry"], "target": pick["target"], "stop": pick["stop"],
         "cdp_base": pick.get("cdp_base"),  # 原始 CDP 價位與當日振幅，供價格模型重放迭代
-
         "day_open": ohlc["o"], "day_high": ohlc["h"], "day_low": ohlc["l"], "day_close": ohlc["c"],
         "filled": False, "fill_price": None, "exit_price": None, "exit_reason": None,
+        "sim_mode": None,
         "gross": 0, "fees": 0, "net": 0, "ret_pct": None,
     }
-    if ohlc["l"] > pick["entry"]:
-        r["exit_reason"] = "nofill"   # 全日未觸及掛買價 → 沒有進場
+    filled, fill, exit_price, reason, mode = simulate_trade(
+        pick["entry"], pick["target"], pick["stop"], ohlc, bars)
+    r["sim_mode"], r["exit_reason"] = mode, reason
+    if not filled:
         return r
-    fill = min(pick["entry"], ohlc["o"])
-    r["filled"], r["fill_price"] = True, fill
-
-    if ohlc["l"] <= pick["stop"] and fill > pick["stop"]:
-        exit_price, reason = pick["stop"], "stop"
-    elif ohlc["h"] >= pick["target"]:
-        exit_price, reason = pick["target"], "target"
-    else:
-        exit_price, reason = ohlc["c"], "close"
-    r["exit_price"], r["exit_reason"] = exit_price, reason
+    r["filled"], r["fill_price"], r["exit_price"] = True, fill, exit_price
 
     shares = lots * 1000
     fee_b, fee_s, tax = trade_fees(fill, exit_price, lots, fees_cfg)
@@ -56,16 +91,17 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1):
     return r
 
 
-def run_review(picks_doc, trade_snapshot, cfg):
-    """picks_doc: 前一交易日產生的 picks.json 內容；trade_snapshot: 建議執行日的快照。
-    回傳一筆 reviews.json 的日紀錄。"""
+def run_review(picks_doc, trade_snapshot, cfg, intraday=None):
+    """picks_doc: 前一交易日產生的 picks.json 內容；trade_snapshot: 建議執行日的快照；
+    intraday: {code: bars} 當日 5 分K（可 None）。回傳一筆 reviews.json 的日紀錄。"""
     lots = cfg["simulation"]["lots_per_trade"]
+    intraday = intraday or {}
     results = []
     for pick in picks_doc.get("picks", []):
         k = trade_snapshot["stocks"].get(pick["code"])
         if not k:
             continue  # 停牌等情況：無資料不計
-        results.append(simulate_pick(pick, k, cfg["fees"], lots))
+        results.append(simulate_pick(pick, k, cfg["fees"], lots, intraday.get(pick["code"])))
     filled = [r for r in results if r["filled"]]
     wins = [r for r in filled if r["net"] > 0]
     return {
@@ -76,6 +112,7 @@ def run_review(picks_doc, trade_snapshot, cfg):
             "n_picks": len(results),
             "n_filled": len(filled),
             "n_wins": len(wins),
+            "n_intraday": sum(1 for r in results if r["sim_mode"] == "intraday"),
             "win_rate": round(len(wins) / len(filled) * 100, 1) if filled else None,
             "gross": sum(r["gross"] for r in filled),
             "fees": sum(r["fees"] for r in filled),

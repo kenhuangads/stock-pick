@@ -88,8 +88,9 @@
   <section class="panel" id="panel-review">
     <div class="stat-row" id="reviewStats"></div>
     <div class="chart-card"><canvas id="pnlChart"></canvas></div>
-    <div class="notice small">模擬規則：隔日以建議價掛限價買單（最低價 ≤ 掛價才視為成交、開盤更低以開盤價成交）；
-    出場採<b>保守假設</b>——先檢查停損、再停利、皆未觸及以收盤價沖銷。損益已含手續費（依你設定的折數）與當沖證交稅 0.15%。</div>
+    <div class="notice small">模擬規則：隔日以建議價掛限價買單，<b>以 5 分K逐根核實進出場順序</b>——第一根觸及掛價的 K 棒成交，
+    成交那根不認停利（高點可能發生在買進之前）；其後每根先檢查停損、再停利，收盤前未觸及以收盤價沖銷。
+    無 5 分K資料的舊紀錄以日K保守規則模擬。損益已含手續費（依你設定的折數）與當沖證交稅 0.15%。</div>
     <div class="log-card" id="priceModelCard" hidden>
       <h3>📐 價格模型（進出場價迭代）</h3>
       <div class="notice small" id="priceModelInfo"></div>

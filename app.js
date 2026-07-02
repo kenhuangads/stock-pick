@@ -267,9 +267,10 @@ function renderReview() {
         <td class="${signCls(p.ret_pct)}">${signTxt(p.ret_pct)}${fmt2(p.ret_pct)}%</td>
         <td class="${signCls(p._net)}">${signTxt(p._net)}${fmt(p._net)}</td></tr>`;
     }).join("");
+    const nIntra = d.raw.summary?.n_intraday;
     return `<details class="day-block" ${idx === 0 ? "open" : ""}>
       <summary><span class="d">${d.date}</span>
-        <span class="s">${d.filled}/${d.raw.picks.length} 筆成交 · 勝率 ${d.winRate == null ? "–" : d.winRate.toFixed(0) + "%"}</span>
+        <span class="s">${d.filled}/${d.raw.picks.length} 筆成交 · 勝率 ${d.winRate == null ? "–" : d.winRate.toFixed(0) + "%"}${nIntra ? ` · 5分K核實 ${nIntra}/${d.raw.picks.length}` : ""}</span>
         <span class="pnl ${signCls(d.net)}">${signTxt(d.net)}${fmt(d.net)}</span></summary>
       <div class="tbl-wrap"><table class="trades">
         <tr><th>標的</th><th>進場</th><th>出場</th><th>原因</th><th>報酬</th><th>淨損益</th></tr>
@@ -289,8 +290,10 @@ function renderPriceModel() {
      績效明顯改善才切換（防止雜訊抖動）。目前偏移：進場 <b>${shiftTxt(sh.entry ?? 0)}</b> ·
      停利 <b>${shiftTxt(sh.target ?? 0)}</b> · 停損 <b>${shiftTxt(sh.stop ?? 0)}</b>
      ${s.net != null && s.net_baseline != null ? `｜窗口淨損益 <b>${fmt(s.net)}</b> vs 原始 CDP <b>${fmt(s.net_baseline)}</b> 元` : ""}`;
+  const frCls = s.fill_target == null ? "" : (s.fill_rate ?? 0) >= s.fill_target ? "up" : "down";
   $("#priceModelStats").innerHTML = `
-    <div class="stat"><div class="lb">掛單成交率</div><div class="v">${s.fill_rate ?? "–"}%</div></div>
+    <div class="stat"><div class="lb">掛單成交率${s.fill_target != null ? `（目標 ≥${s.fill_target}%）` : ""}</div>
+      <div class="v ${frCls}">${s.fill_rate ?? "–"}%</div></div>
     <div class="stat"><div class="lb">停利出場占比</div><div class="v up">${s.target_rate ?? "–"}%</div></div>
     <div class="stat"><div class="lb">停損出場占比</div><div class="v down">${s.stop_rate ?? "–"}%</div></div>
     <div class="stat"><div class="lb">掛價過低錯失率</div><div class="v">${s.runaway_rate ?? "–"}%</div></div>`;

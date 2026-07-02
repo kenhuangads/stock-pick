@@ -48,11 +48,11 @@ def strategy_stats(reviews, window_days):
 
 def compute_weights(stats, opt_cfg, prev_doc=None):
     """回傳 (weights{sid:w}, stats_with_weight, log_entries)"""
-    prev_enabled = {}
-    if prev_doc:
-        for sid, s in prev_doc.get("stats", {}).items():
-            prev_enabled[sid] = s.get("enabled", True)
+    prev_stats = (prev_doc or {}).get("stats", {})
+    prev_enabled = {sid: s.get("enabled", True) for sid, s in prev_stats.items()}
     weights, log = {}, []
+
+    # 第一輪：依窗口績效判定啟停與權重
     for s in STRATEGIES:
         sid = s["id"]
         st = stats[sid]
@@ -70,18 +70,40 @@ def compute_weights(stats, opt_cfg, prev_doc=None):
                 enabled = True
                 w = 0.5 + (st["win_rate"] - 50) * 0.03 + exp_frac * 40
                 w = max(opt_cfg["weight_min"], min(opt_cfg["weight_max"], round(w, 2)))
-        st["weight"] = w
-        st["enabled"] = enabled
-        st["candidate"] = is_cand
+        st["weight"], st["enabled"], st["candidate"], st["floor"] = w, enabled, is_cand, False
         weights[sid] = w
-        # 候選策略以「未啟用」為初始狀態，首次轉正也要留下紀錄
+
+    # 保底機制：啟用策略太少會湊不齊選股門檻 → 系統停擺、不再累積樣本（死亡螺旋）。
+    # 從停用者中取「窗口期望值最佳」以最低權重復活，讓系統持續選股與學習。
+    min_active = opt_cfg.get("min_active", 4)
+    active_n = sum(1 for w in weights.values() if w > 0)
+    if active_n < min_active:
+        bench = sorted(
+            (sid for sid, w in weights.items() if w == 0),
+            key=lambda sid: (stats[sid]["expectancy"] is None, -(stats[sid]["expectancy"] or 0)))
+        for sid in bench[: min_active - active_n]:
+            weights[sid] = opt_cfg["weight_min"]
+            stats[sid]["weight"] = opt_cfg["weight_min"]
+            stats[sid]["enabled"] = True
+            stats[sid]["floor"] = True
+
+    # 統一記錄狀態轉換（保底復活以 floor 標記區分訊息，避免誤導）
+    for s in STRATEGIES:
+        sid, st = s["id"], stats[s["id"]]
+        is_cand = s.get("candidate", False)
         was = prev_enabled.get(sid, False if is_cand else None)
-        if was is not None and was != enabled:
-            if is_cand and enabled:
+        was_floor = prev_stats.get(sid, {}).get("floor", False)
+        if st["floor"]:
+            if not was_floor:
+                log.append(f"策略「{s['name']}」保底啟用（權重 {st['weight']}）——"
+                           f"啟用策略不足 {min_active} 個，取停用中期望值最佳者維持選股與樣本累積")
+            continue
+        if was is not None and was != st["enabled"] or was_floor:
+            if is_cand and st["enabled"]:
                 msg = f"候選策略「{s['name']}」實證有效（期望值轉正），自動納入計分"
             elif is_cand:
                 msg = f"候選策略「{s['name']}」期望值轉負，退回觀察區（持續虛擬追蹤）"
-            elif not enabled:
+            elif not st["enabled"]:
                 msg = f"策略「{s['name']}」停用（期望值轉負，汰弱）"
             else:
                 msg = f"策略「{s['name']}」重新啟用（績效回升，留強）"

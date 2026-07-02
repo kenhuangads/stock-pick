@@ -25,13 +25,15 @@
     "disable_expectancy_below": 0,
     "enable_expectancy_above": 0.001,
     "weight_min": 0.3,
-    "weight_max": 2.0
+    "weight_max": 2.0,
+    "min_active": 4
   },
   "price_optimizer": {
     "window_days": 20,
     "min_trades": 12,
-    "shift_grid": [-0.1, -0.05, 0, 0.05, 0.1],
-    "min_fill_ratio": 0.5,
+    "entry_grid": [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3],
+    "exit_grid": [-0.1, -0.05, 0, 0.05, 0.1],
+    "target_fill_rate": 0.67,
     "improve_margin_pct": 5
   },
   "simulation": {
