@@ -1,0 +1,13 @@
+{
+  "name": "台股當沖選股 DayTrade Picker",
+  "short_name": "當沖選股",
+  "description": "台股當沖智能選股、每日復盤與策略迭代優化工具",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#0e1116",
+  "theme_color": "#0e1116",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

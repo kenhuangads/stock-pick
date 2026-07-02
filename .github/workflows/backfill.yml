@@ -1,0 +1,50 @@
+name: 歷史資料回補
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: '回補交易日數'
+        default: '45'
+      rebuild:
+        description: '回補後以 walk-forward 重建復盤與策略權重'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-update
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: 回補歷史快照
+        run: python scripts/backfill.py ${{ inputs.days }}
+      - name: Walk-forward 重建（復盤 + 策略權重）
+        if: ${{ inputs.rebuild }}
+        run: python scripts/daily_update.py --rebuild
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data/
+          git diff --cached --quiet || { git commit -m "chore(data): backfill ${{ inputs.days }} days"; git push; }
+
+  deploy:
+    needs: backfill
+    uses: ./.github/workflows/pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

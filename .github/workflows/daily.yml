@@ -1,0 +1,59 @@
+name: 每日更新
+
+on:
+  schedule:
+    # 13:00 UTC = 21:00 台北時間，平日執行。
+    # 此時收盤行情、個股當沖統計、處置/注意公告皆已發布；休市日會自動跳過。
+    - cron: '0 13 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '即使沒有新資料也強制重建輸出'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: 抓行情 → 復盤 → 迭代優化 → 智能選股
+        run: python scripts/daily_update.py ${{ inputs.force && '--force' || '' }}
+      - name: Commit 資料更新
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data/
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "沒有資料變更（休市或已更新）"
+          else
+            git commit -m "chore(data): daily update $(TZ=Asia/Taipei date +'%Y-%m-%d')"
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    needs: update
+    if: needs.update.outputs.changed == 'true'
+    uses: ./.github/workflows/pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

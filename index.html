@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<title>台股當沖選股 DayTrade Picker</title>
+<meta name="description" content="台股當沖智能選股、每日復盤與策略迭代優化工具">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">⚡</span>
+    <div>
+      <h1>台股當沖選股</h1>
+      <div class="sub" id="dataDate">載入中…</div>
+    </div>
+  </div>
+  <button class="icon-btn" id="btnSettings" title="設定" aria-label="設定">⚙️</button>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="picks"><span class="t-ico">🎯</span>今日選股</button>
+  <button class="tab" data-tab="custom"><span class="t-ico">🔍</span>自訂選股</button>
+  <button class="tab" data-tab="review"><span class="t-ico">📒</span>每日復盤</button>
+  <button class="tab" data-tab="strategy"><span class="t-ico">🧬</span>策略績效</button>
+</nav>
+
+<main>
+  <!-- ===== 今日選股 ===== -->
+  <section class="panel active" id="panel-picks">
+    <div class="notice" id="picksInfo"></div>
+    <div id="picksList" class="cards"></div>
+    <details class="explain">
+      <summary>📖 本工具使用的選股指標說明（點開查看）</summary>
+      <div id="strategyExplain"></div>
+      <p class="muted small">綜合分數 = 各觸發策略的權重加總；權重每日依復盤績效汰弱留強自動調整（見「策略績效」頁）。
+      建議價位由 CDP 逆勢系統計算：買進掛 NL（近低值）、停利 NH（近高值）、停損 AL（最低值）、AH（最高值）為順勢突破加碼參考。</p>
+    </details>
+  </section>
+
+  <!-- ===== 自訂選股 ===== -->
+  <section class="panel" id="panel-custom">
+    <form class="filter-card" id="customForm" onsubmit="return false">
+      <div class="grid2">
+        <label>價格下限（元）<input type="number" id="fPriceMin" value="10" min="0" step="1" inputmode="decimal"></label>
+        <label>價格上限（元）<input type="number" id="fPriceMax" value="1000" min="0" step="1" inputmode="decimal"></label>
+        <label>均量視窗
+          <select id="fVolWin">
+            <option value="3">近 3 日均量</option>
+            <option value="5" selected>近 5 日均量</option>
+          </select>
+        </label>
+        <label>均量下限（張）<input type="number" id="fVolMin" value="2000" min="0" step="100" inputmode="numeric"></label>
+        <label>月均振幅 ≥（%）<input type="number" id="fAmpMin" value="2.5" min="0" step="0.1" inputmode="decimal"></label>
+        <label>當沖比率 ≥（%）<input type="number" id="fDtMin" value="0" min="0" step="1" inputmode="decimal"></label>
+      </div>
+      <div class="chip-row">
+        <label class="chk"><input type="checkbox" id="fTwse" checked>上市</label>
+        <label class="chk"><input type="checkbox" id="fTpex" checked>上櫃</label>
+        <label class="chk"><input type="checkbox" id="fExcl" checked>排除注意/處置股</label>
+        <label class="chk"><input type="checkbox" id="fDtOk" checked>限可現股當沖</label>
+      </div>
+      <fieldset class="strat-select">
+        <legend>策略指標（複選，命中越多分數越高）</legend>
+        <div id="stratChecks" class="chip-row"></div>
+        <label class="inline">至少命中
+          <select id="fMinHits"><option>0</option><option selected>1</option><option>2</option><option>3</option><option>4</option></select>
+          個策略
+        </label>
+      </fieldset>
+      <div class="btn-row">
+        <button class="btn primary" id="btnScreen">🔍 重新選股</button>
+        <button class="btn" id="btnSaveFilter" type="button">💾 存為預設</button>
+        <button class="btn ghost" id="btnResetFilter" type="button">還原</button>
+      </div>
+    </form>
+    <div class="notice" id="customInfo"></div>
+    <div id="customList" class="cards"></div>
+  </section>
+
+  <!-- ===== 每日復盤 ===== -->
+  <section class="panel" id="panel-review">
+    <div class="stat-row" id="reviewStats"></div>
+    <div class="chart-card"><canvas id="pnlChart"></canvas></div>
+    <div class="notice small">模擬規則：隔日以建議價掛限價買單（最低價 ≤ 掛價才視為成交、開盤更低以開盤價成交）；
+    出場採<b>保守假設</b>——先檢查停損、再停利、皆未觸及以收盤價沖銷。損益已含手續費（依你設定的折數）與當沖證交稅 0.15%。</div>
+    <div id="reviewList"></div>
+  </section>
+
+  <!-- ===== 策略績效 ===== -->
+  <section class="panel" id="panel-strategy">
+    <div class="notice" id="stratInfo"></div>
+    <div class="chart-card"><canvas id="stratChart"></canvas></div>
+    <div id="stratList" class="cards"></div>
+    <div class="log-card">
+      <h3>🧬 汰弱留強紀錄</h3>
+      <div id="evolveLog" class="muted small">尚無調整紀錄</div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div>資料來源：臺灣證券交易所、證券櫃檯買賣中心公開 API · 每個交易日 21:00（台北）自動更新</div>
+  <div class="warn">⚠️ 本工具為程式化研究與教育用途，所有數據與模擬結果僅供參考，非投資建議。當沖交易風險極高，請自行評估並承擔交易風險。</div>
+</footer>
+
+<!-- 設定彈窗 -->
+<dialog id="settingsDlg">
+  <form method="dialog" class="settings">
+    <h3>⚙️ 交易成本設定</h3>
+    <label>手續費折數（例：2.8 折輸入 2.8）
+      <input type="number" id="sDiscount" step="0.1" min="0.1" max="10" inputmode="decimal">
+    </label>
+    <label>單邊最低手續費（元）
+      <input type="number" id="sMinFee" step="1" min="0" inputmode="numeric">
+    </label>
+    <label>每筆模擬張數
+      <input type="number" id="sLots" step="1" min="1" inputmode="numeric">
+    </label>
+    <p class="muted small">變更後復盤損益即時重算：手續費 = 成交金額 × 0.1425% × 折數（低於最低手續費以最低計）；當沖證交稅 = 賣出金額 × 0.15%。設定儲存在此裝置。</p>
+    <div class="btn-row">
+      <button class="btn primary" id="btnSaveSettings" value="save">儲存</button>
+      <button class="btn ghost" value="cancel">取消</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
