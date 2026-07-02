@@ -141,7 +141,14 @@ def main():
         if snap:
             p = twstock.snapshot_path(snap["date"])
             if p.exists():
-                print(f"[fetch] {snap['date']} 快照已存在（今日已更新或休市）")
+                existing = json.loads(p.read_text(encoding="utf-8"))
+                if "punish" not in existing:
+                    # 回補產生的快照缺處置/注意/可當沖名單 → 以完整版本升級
+                    twstock.save_snapshot(snap)
+                    new_data = True
+                    print(f"[fetch] 已升級 {snap['date']} 快照（補上排除名單）")
+                else:
+                    print(f"[fetch] {snap['date']} 快照已存在（今日已更新或休市）")
             else:
                 twstock.save_snapshot(snap)
                 new_data = True

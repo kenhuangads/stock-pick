@@ -58,10 +58,17 @@ async function boot() {
 }
 
 /* ---------- 分頁 ---------- */
+const pendingCharts = {}; // 圖表必須等分頁可見才建立（隱藏容器中 Chart.js 會得到 0 尺寸）
+function chartWhenVisible(tab, draw) {
+  if (document.querySelector(`#panel-${tab}`).classList.contains("active")) draw();
+  else pendingCharts[tab] = draw;
+}
 document.querySelectorAll(".tab").forEach((btn) =>
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
     document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === `panel-${btn.dataset.tab}`));
+    const tab = btn.dataset.tab;
+    if (pendingCharts[tab]) { pendingCharts[tab](); delete pendingCharts[tab]; }
     window.scrollTo({ top: 0 });
   })
 );
@@ -105,7 +112,7 @@ function renderPicks() {
     ? `📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔
        <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。`
     : `本日基礎濾網後沒有符合門檻的標的（或歷史資料尚在累積）。可到「自訂選股」放寬條件。`;
-  $("#picksList").innerHTML = d.picks.map((p, i) => stockCard(p, i + 1)).join("") ||
+  $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
 
   const w = d.weights_used || {};
@@ -218,6 +225,7 @@ function renderReview() {
 
   const css = getComputedStyle(document.documentElement);
   const cUp = css.getPropertyValue("--up").trim(), cDown = css.getPropertyValue("--down").trim();
+  chartWhenVisible("review", () => {
   if (pnlChart) pnlChart.destroy();
   pnlChart = new Chart($("#pnlChart"), {
     data: {
@@ -239,6 +247,7 @@ function renderReview() {
         y1: { position: "right", ticks: { color: "#8a7040", font: { size: 10 } }, grid: { display: false } },
       },
     },
+  });
   });
 
   $("#reviewList").innerHTML = [...daily].reverse().map((d, idx) => {
@@ -273,22 +282,24 @@ function renderStrategies() {
     .map(([id, s]) => ({ id, name: stratMeta[id]?.name || id, desc: stratMeta[id]?.desc || "", ...s }))
     .sort((a, b) => (b.weight || 0) - (a.weight || 0) || (b.win_rate || 0) - (a.win_rate || 0));
 
-  if (stratChart) stratChart.destroy();
-  stratChart = new Chart($("#stratChart"), {
-    type: "bar",
-    data: {
-      labels: list.map((s) => s.name),
-      datasets: [{ label: "勝率 %", data: list.map((s) => s.win_rate ?? 0),
-        backgroundColor: list.map((s) => (s.enabled ? "#f5c04ecc" : "#4a5468cc")) }],
-    },
-    options: {
-      indexAxis: "y", responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { max: 100, ticks: { color: "#5b6675" }, grid: { color: "#1c2330" } },
-        y: { ticks: { color: "#93a4b8", font: { size: 11 } }, grid: { display: false } },
+  chartWhenVisible("strategy", () => {
+    if (stratChart) stratChart.destroy();
+    stratChart = new Chart($("#stratChart"), {
+      type: "bar",
+      data: {
+        labels: list.map((s) => s.name),
+        datasets: [{ label: "勝率 %", data: list.map((s) => s.win_rate ?? 0),
+          backgroundColor: list.map((s) => (s.enabled ? "#f5c04ecc" : "#4a5468cc")) }],
       },
-    },
+      options: {
+        indexAxis: "y", responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { max: 100, ticks: { color: "#5b6675" }, grid: { color: "#1c2330" } },
+          y: { ticks: { color: "#93a4b8", font: { size: 11 } }, grid: { display: false } },
+        },
+      },
+    });
   });
 
   $("#stratList").innerHTML = list.map((s) => `<div class="card s-card">
@@ -318,15 +329,16 @@ $("#btnSettings").addEventListener("click", () => {
   $("#sLots").value = settings.lots;
   $("#settingsDlg").showModal();
 });
-$("#settingsDlg").addEventListener("close", () => {
-  if ($("#settingsDlg").returnValue !== "save") return;
+$("#btnSaveSettings").addEventListener("click", () => {
   settings = {
     discount: Math.max(0.1, +$("#sDiscount").value || DEFAULT_SETTINGS.discount),
-    minFee: Math.max(0, +$("#sMinFee").value ?? DEFAULT_SETTINGS.minFee),
+    minFee: Math.max(0, +$("#sMinFee").value || 0),
     lots: Math.max(1, Math.round(+$("#sLots").value || 1)),
   };
   localStorage.setItem("sp_settings", JSON.stringify(settings));
+  $("#settingsDlg").close();
   if (DB.reviews) renderReview();
 });
+$("#btnCancelSettings").addEventListener("click", () => $("#settingsDlg").close());
 
 boot();
