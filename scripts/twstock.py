@@ -15,8 +15,10 @@ import json
 import re
 import ssl
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+TAIPEI = timezone(timedelta(hours=8))
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -401,7 +403,18 @@ def build_snapshot_for_date(iso_date, with_extras=False):
 
 
 def build_latest_snapshot():
-    """每日更新模式：以 STOCK_DAY_ALL 的日期為準組出最新快照（含排除名單）。"""
+    """每日更新模式：優先以「台北今日」抓 MI_INDEX/TPEx（收盤後約 15:00 即發布），
+    今日非交易日或資料未出才退回 STOCK_DAY_ALL（該端點常拖到深夜才更新，
+    若以它為準，21:00 排程抓到的永遠是前一交易日 → 資料日慢一天）。"""
+    today = datetime.now(TAIPEI).date().isoformat()
+    if not snapshot_path(today).exists():
+        try:
+            snap = build_snapshot_for_date(today, with_extras=True)
+            if snap:
+                return snap
+            print(f"[fetch] {today} 非交易日（TPEx 無資料），改抓最近交易日")
+        except RuntimeError as e:
+            print(f"[warn] {e}；改抓 STOCK_DAY_ALL（若日期落後，之後可用回補 Workflow 補洞）")
     iso, twse = fetch_twse_day_all()
     if not iso or not twse:
         return None
