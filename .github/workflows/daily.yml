@@ -4,7 +4,9 @@ on:
   schedule:
     # 13:07 UTC = 21:07 台北時間，平日執行（避開整點尖峰——GitHub 整點 cron 常被延遲或丟棄）。
     # 此時收盤行情、個股當沖統計、處置/注意公告皆已發布；休市日會自動跳過。
+    # 21:37 為兜底排程：GitHub schedule 偶發靜默不觸發，重複執行冪等無害（已更新會自動跳過）。
     - cron: '7 13 * * 1-5'
+    - cron: '37 13 * * 1-5'
   workflow_dispatch:
     inputs:
       force:
