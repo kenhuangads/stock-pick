@@ -136,9 +136,10 @@ python -m http.server 8000           # 本機預覽前端
 
 | Workflow | 觸發 | 用途 |
 | --- | --- | --- |
-| `每日更新` | 平日 21:00（台北）／手動 | 抓資料→復盤→優化→選股→commit→部署 |
+| `每日更新` | 平日 21:07（台北）／手動 | 抓資料→復盤→審計→優化→選股→commit |
 | `歷史資料回補` | 手動 | 首次建置或補資料缺口，可選 walk-forward 重建 |
-| `部署 GitHub Pages` | push main／被上述呼叫 | 靜態站部署（自動啟用 Pages） |
+
+Pages 採 **branch 部署**（main 根目錄、含 `.nojekyll`）：任何 push 後 GitHub 自動建置上線，無需部署 workflow。
 
 ## 已知限制與模擬假設
 
