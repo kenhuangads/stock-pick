@@ -34,6 +34,8 @@ jobs:
       - run: pip install -r requirements.txt
       - name: 抓行情 → 復盤 → 迭代優化 → 智能選股
         run: python scripts/daily_update.py ${{ inputs.force && '--force' || '' }}
+      - name: 復盤紀錄審計（逐筆重放核實，未通過不得 commit）
+        run: python scripts/verify_reviews.py
       - name: Commit 資料更新
         id: commit
         run: |

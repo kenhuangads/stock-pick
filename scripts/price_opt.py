@@ -16,7 +16,7 @@
 4. 所有切換寫入 log，前端「每日復盤」頁完整呈現診斷與軌跡。
 """
 from indicators import round_tick, tick_size
-from review import trade_fees, simulate_trade
+from review import trade_fees, simulate_trade, bars_match_ohlc
 from intraday import load_intraday
 
 ZERO = {"entry": 0.0, "target": 0.0, "stop": 0.0}
@@ -79,8 +79,13 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
     for day in window:
         bars_by_code = load_intraday(day["date"])
         for r in day["picks"]:
-            if r.get("cdp_base"):
-                records.append((r, bars_by_code.get(r["code"])))
+            if not r.get("cdp_base"):
+                continue
+            b = bars_by_code.get(r["code"])
+            ohlc = {"o": r["day_open"], "h": r["day_high"], "l": r["day_low"], "c": r["day_close"]}
+            if b and not bars_match_ohlc(b, ohlc):
+                b = None  # 資料品質防線：與官方日K不符的 5分K 不得參與重放
+            records.append((r, b))
     fees_cfg, lots = cfg["fees"], cfg["simulation"]["lots_per_trade"]
 
     base = _replay(records, ZERO, fees_cfg, lots)

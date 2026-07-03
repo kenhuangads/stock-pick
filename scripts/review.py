@@ -30,6 +30,19 @@ def trade_fees(buy_price, sell_price, lots, fees_cfg, discount=None):
     return fee_buy, fee_sell, tax
 
 
+def bars_match_ohlc(bars, ohlc, tol=0.005, min_bars=40):
+    """5分K 資料品質防線：與官方日K的開/高/低價差超過容忍值、或根數不足
+    （缺漏/錯位/分盤異常）→ 判定不可信，模擬退回日K保守規則。
+    （曾發現 Yahoo 個別日期整批錯位、高低價差達 20%，不擋會污染復盤。）"""
+    if not bars or len(bars) < min_bars:
+        return False
+    agg = (bars[0][0], max(b[1] for b in bars), min(b[2] for b in bars))
+    for a, b in zip(agg, (ohlc["o"], ohlc["h"], ohlc["l"])):
+        if not b or abs(a - b) / b > tol:
+            return False
+    return True
+
+
 def simulate_trade(entry, target, stop, ohlc, bars=None):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
@@ -74,6 +87,8 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None):
         "sim_mode": None,
         "gross": 0, "fees": 0, "net": 0, "ret_pct": None,
     }
+    if bars and not bars_match_ohlc(bars, ohlc):
+        bars = None  # 5分K與官方日K不符（錯位/缺漏），退回日K保守模擬
     filled, fill, exit_price, reason, mode = simulate_trade(
         pick["entry"], pick["target"], pick["stop"], ohlc, bars)
     r["sim_mode"], r["exit_reason"] = mode, reason
