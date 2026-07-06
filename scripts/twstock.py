@@ -402,31 +402,39 @@ def build_snapshot_for_date(iso_date, with_extras=False):
     return snap
 
 
-def build_latest_snapshot():
-    """每日更新模式：優先以「台北今日」抓 MI_INDEX/TPEx（收盤後約 15:00 即發布），
-    今日非交易日或資料未出才退回 STOCK_DAY_ALL（該端點常拖到深夜才更新，
-    若以它為準，21:00 排程抓到的永遠是前一交易日 → 資料日慢一天）。"""
-    today = datetime.now(TAIPEI).date().isoformat()
-    if not snapshot_path(today).exists():
+def build_latest_snapshot(max_lookback=6):
+    """每日更新模式：從「台北今日」往回探，找到最近一個有行情的交易日並組出快照。
+
+    以 date-specific 的 MI_INDEX + TPEx dailyQuotes 為準（可靠、當日 15:00 即發布），
+    而非 STOCK_DAY_ALL——後者常拖到深夜才更新、且無法指定日期。
+
+    往回探是關鍵：GitHub 排程可能延遲數小時、跨過午夜才觸發，此時「台北今日」
+    已是隔天（尚未開盤、無資料）。逐日回退能在這種情況下正確抓到真正的最新交易日，
+    週末、國定假日也自然跳過。已入庫且完整的交易日 → 回傳既有快照（交由呼叫端判斷略過）。
+    """
+    today = datetime.now(TAIPEI).date()
+    for back in range(max_lookback):
+        d = today - timedelta(days=back)
+        if d.weekday() >= 5:      # 週六、週日直接跳過，省一次無謂查詢
+            continue
+        iso = d.isoformat()
+        p = snapshot_path(iso)
+        if p.exists():
+            existing = json.loads(p.read_text(encoding="utf-8"))
+            if "punish" in existing:          # 已有完整快照 → 這就是最新交易日，不需重抓
+                print(f"[fetch] 最新交易日 {iso} 快照已完整")
+                return existing
         try:
-            snap = build_snapshot_for_date(today, with_extras=True)
-            if snap:
-                return snap
-            print(f"[fetch] {today} 非交易日（TPEx 無資料），改抓最近交易日")
+            snap = build_snapshot_for_date(iso, with_extras=True)
         except RuntimeError as e:
-            print(f"[warn] {e}；改抓 STOCK_DAY_ALL（若日期落後，之後可用回補 Workflow 補洞）")
-    iso, twse = fetch_twse_day_all()
-    if not iso or not twse:
-        return None
-    tpex = fetch_tpex_daily(iso)
-    dt = fetch_twse_daytrade_stats(iso)
-    stocks = {**tpex, **twse}
-    for code, sh in (dt or {}).items():
-        if code in stocks:
-            stocks[code]["dt"] = sh
-    snap = {"date": iso, "stocks": stocks}
-    _attach_extras(snap)
-    return snap
+            print(f"[warn] {iso} 疑似限流：{e}")
+            continue
+        if snap:
+            print(f"[fetch] 探得最新交易日 {iso}（回退 {back} 天）")
+            return snap
+        # snap is None → 該日 TPEx 無資料（非交易日），繼續往前一天探
+    print(f"[warn] 回退 {max_lookback} 天仍無交易日資料")
+    return None
 
 
 def _attach_extras(snap):
