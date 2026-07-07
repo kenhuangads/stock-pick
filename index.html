@@ -88,6 +88,7 @@
   <section class="panel" id="panel-review">
     <div class="stat-row" id="reviewStats"></div>
     <div class="chart-card"><canvas id="pnlChart"></canvas></div>
+    <div class="notice small" id="riskNote"></div>
     <div class="notice small">模擬規則：隔日以建議價掛限價買單，<b>以 5 分K逐根核實進出場順序</b>——第一根觸及掛價的 K 棒成交，
     成交那根不認停利（高點可能發生在買進之前）；其後每根先檢查停損、再停利，收盤前未觸及以收盤價沖銷。
     無 5 分K資料的舊紀錄以日K保守規則模擬。損益已含手續費（依你設定的折數）與當沖證交稅 0.15%。</div>
@@ -127,10 +128,35 @@
     <label>單邊最低手續費（元）
       <input type="number" id="sMinFee" step="1" min="0" inputmode="numeric">
     </label>
-    <label>每筆模擬張數
+    <label>每筆模擬張數（未風控對照 / 固定張數模式用）
       <input type="number" id="sLots" step="1" min="1" inputmode="numeric">
     </label>
     <p class="muted small">變更後復盤損益即時重算：手續費 = 成交金額 × 0.1425% × 折數（低於最低手續費以最低計）；當沖證交稅 = 賣出金額 × 0.15%。設定儲存在此裝置。</p>
+
+    <fieldset class="strat-select">
+      <legend>🛡️ 每日虧損風控</legend>
+      <label class="chk"><input type="checkbox" id="sRiskEnabled">啟用每日虧損風控（部位風險預算＋斷路器）</label>
+      <label>每日累計虧損上限（元，觸及即停開新倉）
+        <input type="number" id="sDailyLimit" step="1000" min="0" inputmode="numeric">
+      </label>
+      <label>連續虧損停手筆數
+        <input type="number" id="sMaxConsec" step="1" min="1" inputmode="numeric">
+      </label>
+      <label>部位大小方式
+        <select id="sSizing">
+          <option value="risk_parity">風險預算（每筆風險相近，自動決定張數）</option>
+          <option value="fixed">固定張數（用上方每筆模擬張數）</option>
+        </select>
+      </label>
+      <label>每筆風險預算（元，風險預算模式）
+        <input type="number" id="sPerTradeRisk" step="500" min="0" inputmode="numeric">
+      </label>
+      <label>單筆最大張數上限
+        <input type="number" id="sMaxLots" step="1" min="1" inputmode="numeric">
+      </label>
+      <p class="muted small">風控只影響「每日復盤」的損益呈現（終極目標：把單日綜合虧損壓在上限內），不改變選股結果。斷路器依綜合分數（信心）順序進場，超限即停。</p>
+    </fieldset>
+
     <div class="btn-row">
       <button type="button" class="btn primary" id="btnSaveSettings">儲存</button>
       <button type="button" class="btn ghost" id="btnCancelSettings">取消</button>

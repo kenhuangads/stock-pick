@@ -91,6 +91,21 @@ STRATEGIES = [
         "fn": lambda m: m["up3"] and m["vol_nofade"],
         "candidate": True,
     },
+    # ---- 籌碼面候選策略（用三大法人買賣超、融資融券資料）----
+    {
+        "id": "inst_buy",
+        "name": "法人買超",
+        "desc": "三大法人合計淨買超 ≥ 500 張且今日收紅，法人資金認同、隔日慣性偏多（籌碼面）",
+        "fn": lambda m: (m.get("inst_net") or 0) >= 500 and m["close"] > m["open"],
+        "candidate": True,
+    },
+    {
+        "id": "short_squeeze",
+        "name": "軋空題材",
+        "desc": "券資比 ≥ 15% 且融券較前日增加、今日收紅，空方回補潛在燃料充足（籌碼面）",
+        "fn": lambda m: (m.get("margin_short_ratio") or 0) >= 15 and (m.get("short_increase") or 0) > 0 and m["close"] > m["open"],
+        "candidate": True,
+    },
 ]
 
 STRAT_BY_ID = {s["id"]: s for s in STRATEGIES}

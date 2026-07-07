@@ -83,6 +83,12 @@ def compute_stock_metrics(series):
     if today.get("sh"):
         turnover = today["v"] / today["sh"] * 100
 
+    # 籌碼面指標（缺資料則為 None，候選策略自然不觸發）
+    inst_net = today.get("inst")                       # 三大法人合計淨買超（張）
+    mgn, sht, sht0 = today.get("mgn"), today.get("sht"), today.get("sht0")
+    margin_short_ratio = round(sht / mgn * 100, 2) if mgn else None   # 券資比 %
+    short_increase = (sht - sht0) if (sht is not None and sht0 is not None) else None
+
     return {
         "close": today["c"], "open": today["o"], "high": today["h"], "low": today["l"],
         "chg_pct": round((today["c"] - prev["c"]) / prev["c"] * 100, 2) if prev["c"] else 0,
@@ -103,6 +109,9 @@ def compute_stock_metrics(series):
         "dt_ratio": round(dt_ratio, 1) if dt_ratio is not None else None,
         "dt_ratio_ma5": round(dt_ratio_ma5, 1) if dt_ratio_ma5 is not None else None,
         "turnover": round(turnover, 2) if turnover is not None else None,
+        "inst_net": inst_net,
+        "margin_short_ratio": margin_short_ratio,
+        "short_increase": short_increase,
         "cdp": cdp(today["h"], today["l"], today["c"]),
         "days": len(series),
     }

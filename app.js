@@ -26,7 +26,7 @@ function tradeNet(fill, exit, lots) {
 }
 
 /* ---------- 資料載入 ---------- */
-let DB = { picks: null, market: null, reviews: null, strategies: null, priceModel: null };
+let DB = { picks: null, market: null, reviews: null, strategies: null, priceModel: null, config: null };
 let stratMeta = {}; // id -> {name, desc, candidate}
 
 async function loadJSON(path) {
@@ -44,7 +44,8 @@ async function boot() {
       loadJSON("data/latest/strategies.json"),
     ]);
     const priceModel = await loadJSON("data/latest/price_model.json").catch(() => null); // 舊部署可能還沒有
-    DB = { picks, market, reviews, strategies, priceModel };
+    const config = await loadJSON("data/latest/config_snapshot.json").catch(() => null);   // 風控預設值
+    DB = { picks, market, reviews, strategies, priceModel, config };
     (market.strategies || []).forEach((s) => (stratMeta[s.id] = s));
     Object.entries(strategies.meta || {}).forEach(([id, m]) => (stratMeta[id] = { id, ...m }));
     $("#dataDate").textContent = `資料日：${market.date} · 更新：${(market.updated_at || "").slice(0, 16).replace("T", " ")}`;
@@ -196,20 +197,58 @@ function runCustomScreen() {
     `<div class="empty">沒有符合條件的標的，試著放寬條件</div>`;
 }
 
-/* ---------- Tab 3 每日復盤 ---------- */
+/* ---------- Tab 3 每日復盤（含每日虧損風控層）---------- */
 let pnlChart;
+const RISK_DEFAULTS = { enabled: true, daily_loss_limit: 10000, max_consecutive_losses: 3,
+  position_sizing: "risk_parity", per_trade_risk: 2500, max_lots: 4, lots: 1 };
+function riskParams() {
+  return { ...RISK_DEFAULTS, ...(DB.config?.risk || {}), ...(settings.risk || {}) };
+}
+function sizeLots(p, rk) {
+  // 部位風險預算：每筆風險 ≈ per_trade_risk，故張數 = 預算 /（進場−停損）/1000，夾在 [1, max_lots]
+  if (rk.position_sizing === "risk_parity" && p.fill_price > p.stop) {
+    const perLot = (p.fill_price - p.stop) * 1000;
+    return Math.max(1, Math.min(rk.max_lots, Math.round(rk.per_trade_risk / perLot)));
+  }
+  return Math.max(1, Math.round(rk.lots || settings.lots || 1));
+}
+/* 同時算 raw（每筆固定張數全開）與 managed（部位風險預算＋每日虧損斷路器）。
+   斷路器：依綜合分數（信心）順序進場，當日累計實現虧損 ≤ −上限、或連虧 N 筆 → 停開新倉。 */
 function recomputeDay(day) {
-  const lots = settings.lots;
-  let net = 0, gross = 0, fees = 0, wins = 0, filled = 0;
-  const rows = day.picks.map((p) => {
-    if (!p.filled) return { ...p, _net: null };
-    const r = tradeNet(p.fill_price, p.exit_price, lots);
-    filled++; net += r.net; gross += r.gross; fees += r.fees;
-    if (r.net > 0) wins++;
-    return { ...p, _net: r.net, _fees: r.fees };
+  const rk = riskParams();
+  const lots0 = settings.lots;
+  let rawNet = 0, rawWins = 0, filled = 0;
+  const rawByCode = {};
+  day.picks.forEach((p) => {
+    if (!p.filled) return;
+    const r = tradeNet(p.fill_price, p.exit_price, lots0);
+    rawNet += r.net; filled++; if (r.net > 0) rawWins++;
+    rawByCode[p.code] = r.net;
   });
-  return { rows, net, gross, fees, wins, filled,
-    winRate: filled ? (wins / filled) * 100 : null };
+  const order = day.picks.filter((p) => p.filled).slice()
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
+  let mNet = 0, taken = 0, skipped = 0, mWins = 0, consec = 0, halted = false;
+  const ann = {};
+  order.forEach((p) => {
+    const lots = rk.enabled ? sizeLots(p, rk) : lots0;
+    const r = tradeNet(p.fill_price, p.exit_price, lots);
+    if (rk.enabled) {
+      if (halted) { skipped++; ann[p.code] = { taken: false, lots, reason: "consec" }; return; }
+      // 進場前風險閘門：這筆觸停損的最大淨虧損必須 ≤ 當日剩餘額度，否則不進場。
+      // 因實際出場價 ≥ 停損價，故此規則在數學上保證單日淨虧損永不超過上限。
+      const worstLoss = -tradeNet(p.fill_price, p.stop, lots).net;   // 觸停損的最大虧損（含費用，正值）
+      const remaining = rk.daily_loss_limit + mNet;                  // 剩餘可承受虧損
+      if (worstLoss > remaining) { skipped++; ann[p.code] = { taken: false, lots, reason: "budget" }; return; }
+    }
+    mNet += r.net; taken++;
+    if (r.net > 0) { mWins++; consec = 0; }
+    else { consec++; if (consec >= rk.max_consecutive_losses) halted = true; }
+    ann[p.code] = { taken: true, lots, net: r.net };
+  });
+  const rows = day.picks.map((p) => ({ ...p, _net: p.filled ? rawByCode[p.code] : null, _m: ann[p.code] }));
+  return { rows, net: mNet, rawNet, filled, wins: mWins, taken, skipped, halted,
+    winRate: taken ? (mWins / taken) * 100 : null,
+    rawWinRate: filled ? (rawWins / filled) * 100 : null };
 }
 function renderReview() {
   const days = [...DB.reviews].sort((a, b) => a.date.localeCompare(b.date));
@@ -218,17 +257,31 @@ function renderReview() {
     $("#reviewList").innerHTML = `<div class="empty">尚無復盤紀錄。系統每天收盤後會自動用實際行情驗證前一日的建議單。</div>`;
     return;
   }
+  const rk = riskParams();
   const daily = days.map((d) => ({ date: d.date, ...recomputeDay(d), raw: d }));
-  let cum = 0;
-  const cumSeries = daily.map((d) => (cum += d.net));
-  const totNet = cum, totFilled = daily.reduce((s, d) => s + d.filled, 0);
+  let cumM = 0, cumR = 0;
+  const cumManaged = [], cumRaw = [];
+  daily.forEach((d) => { cumManaged.push(cumM += d.net); cumRaw.push(cumR += d.rawNet); });
+  const totNet = cumM, totRaw = cumR;
+  const totTaken = daily.reduce((s, d) => s + d.taken, 0);
   const totWins = daily.reduce((s, d) => s + d.wins, 0);
+  const haltDays = daily.filter((d) => d.halted).length;
+  const worstM = Math.min(...daily.map((d) => d.net));
+  const rawBreach = daily.filter((d) => d.rawNet < -rk.daily_loss_limit).length;
+  const mBreach = daily.filter((d) => d.net < -rk.daily_loss_limit).length;
 
   $("#reviewStats").innerHTML = `
-    <div class="stat"><div class="lb">累計淨損益</div><div class="v ${signCls(totNet)}">${signTxt(totNet)}${fmt(totNet)}</div></div>
-    <div class="stat"><div class="lb">總勝率</div><div class="v">${totFilled ? ((totWins / totFilled) * 100).toFixed(1) : "–"}%</div></div>
-    <div class="stat"><div class="lb">成交筆數</div><div class="v">${fmt(totFilled)}</div></div>
-    <div class="stat"><div class="lb">復盤天數</div><div class="v">${daily.length}</div></div>`;
+    <div class="stat"><div class="lb">累計淨損益<span class="muted">（風控後）</span></div><div class="v ${signCls(totNet)}">${signTxt(totNet)}${fmt(totNet)}</div></div>
+    <div class="stat"><div class="lb">總勝率<span class="muted">（風控後）</span></div><div class="v">${totTaken ? ((totWins / totTaken) * 100).toFixed(1) : "–"}%</div></div>
+    <div class="stat"><div class="lb">最慘單日<span class="muted">（風控後）</span></div><div class="v ${signCls(worstM)}">${signTxt(worstM)}${fmt(worstM)}</div></div>
+    <div class="stat"><div class="lb">觸發斷路器</div><div class="v">${haltDays} 天</div></div>`;
+
+  $("#riskNote").innerHTML = rk.enabled
+    ? `🛡️ 已套用每日虧損風控：部位<b>${rk.position_sizing === "risk_parity" ? `風險預算 ${fmt(rk.per_trade_risk)} 元/筆` : `固定 ${rk.lots} 張`}</b>、
+       單日累計虧損觸及 <b>−${fmt(rk.daily_loss_limit)}</b> 或連虧 <b>${rk.max_consecutive_losses}</b> 筆即停開新倉。
+       單日虧損破 ${fmt(rk.daily_loss_limit)} 的天數：<b class="down">原始 ${rawBreach} 天 → 風控後 ${mBreach} 天</b>；
+       未套風控的累計損益為 ${signTxt(totRaw)}${fmt(totRaw)}（每筆固定 ${settings.lots} 張）。可在 ⚙️ 設定調整。`
+    : `⚠️ 每日虧損風控已關閉，顯示為每筆固定 ${settings.lots} 張全開的原始結果。可在 ⚙️ 設定開啟。`;
 
   const css = getComputedStyle(document.documentElement);
   const cUp = css.getPropertyValue("--up").trim(), cDown = css.getPropertyValue("--down").trim();
@@ -238,9 +291,11 @@ function renderReview() {
     data: {
       labels: daily.map((d) => d.date.slice(5)),
       datasets: [
-        { type: "line", label: "累計淨損益", data: cumSeries, borderColor: css.getPropertyValue("--gold").trim(),
+        { type: "line", label: "累計（風控後）", data: cumManaged, borderColor: css.getPropertyValue("--gold").trim(),
           backgroundColor: "transparent", tension: 0.25, pointRadius: 0, borderWidth: 2, yAxisID: "y1" },
-        { type: "bar", label: "單日淨損益", data: daily.map((d) => d.net),
+        { type: "line", label: "累計（未風控）", data: cumRaw, borderColor: "#5b6675",
+          borderDash: [4, 4], backgroundColor: "transparent", tension: 0.25, pointRadius: 0, borderWidth: 1.5, yAxisID: "y1" },
+        { type: "bar", label: "單日（風控後）", data: daily.map((d) => d.net),
           backgroundColor: daily.map((d) => (d.net >= 0 ? cUp + "cc" : cDown + "cc")), yAxisID: "y" },
       ],
     },
@@ -261,19 +316,26 @@ function renderReview() {
     const reasonTxt = { target: "停利", stop: "停損", close: "收盤沖銷", nofill: "未成交" };
     const rows = d.rows.map((p) => {
       if (!p.filled) return `<tr class="dim"><td>${p.code} ${p.name}</td><td>${fmt2(p.entry)}</td>
-        <td colspan="2">未成交（最低 ${fmt2(p.day_low)} 未觸價）</td><td>–</td><td>–</td></tr>`;
+        <td colspan="3">未成交（最低 ${fmt2(p.day_low)} 未觸價）</td><td>–</td></tr>`;
+      const m = p._m || {};
+      if (!m.taken) {
+        const why = m.reason === "consec" ? "🛑 連虧停手" : "🛑 超出當日風險額度";
+        return `<tr class="dim"><td>${p.code} ${p.name}</td><td>${fmt2(p.fill_price)}</td>
+        <td>${fmt2(p.exit_price)}</td><td colspan="2">${why}</td>
+        <td class="muted">(未取 ${signTxt(p._net)}${fmt(p._net)})</td></tr>`;
+      }
       return `<tr><td>${p.code} ${p.name}</td><td>${fmt2(p.fill_price)}</td>
         <td>${fmt2(p.exit_price)}</td><td>${reasonTxt[p.exit_reason] || p.exit_reason}</td>
-        <td class="${signCls(p.ret_pct)}">${signTxt(p.ret_pct)}${fmt2(p.ret_pct)}%</td>
-        <td class="${signCls(p._net)}">${signTxt(p._net)}${fmt(p._net)}</td></tr>`;
+        <td>${m.lots} 張</td>
+        <td class="${signCls(m.net)}">${signTxt(m.net)}${fmt(m.net)}</td></tr>`;
     }).join("");
     const nIntra = d.raw.summary?.n_intraday;
     return `<details class="day-block" ${idx === 0 ? "open" : ""}>
       <summary><span class="d">${d.date}</span>
-        <span class="s">${d.filled}/${d.raw.picks.length} 筆成交 · 勝率 ${d.winRate == null ? "–" : d.winRate.toFixed(0) + "%"}${nIntra ? ` · 5分K核實 ${nIntra}/${d.raw.picks.length}` : ""}</span>
+        <span class="s">${d.taken}/${d.filled} 筆進場${d.skipped ? `（斷路器跳過 ${d.skipped}）` : ""} · 勝率 ${d.winRate == null ? "–" : d.winRate.toFixed(0) + "%"}${nIntra ? ` · 5分K核實 ${nIntra}` : ""}</span>
         <span class="pnl ${signCls(d.net)}">${signTxt(d.net)}${fmt(d.net)}</span></summary>
       <div class="tbl-wrap"><table class="trades">
-        <tr><th>標的</th><th>進場</th><th>出場</th><th>原因</th><th>報酬</th><th>淨損益</th></tr>
+        <tr><th>標的</th><th>進場</th><th>出場</th><th>原因</th><th>張數</th><th>淨損益</th></tr>
         ${rows}</table></div>
     </details>`;
   }).join("");
@@ -361,13 +423,29 @@ $("#btnSettings").addEventListener("click", () => {
   $("#sDiscount").value = settings.discount;
   $("#sMinFee").value = settings.minFee;
   $("#sLots").value = settings.lots;
+  const rk = riskParams();
+  $("#sRiskEnabled").checked = rk.enabled;
+  $("#sDailyLimit").value = rk.daily_loss_limit;
+  $("#sMaxConsec").value = rk.max_consecutive_losses;
+  $("#sSizing").value = rk.position_sizing;
+  $("#sPerTradeRisk").value = rk.per_trade_risk;
+  $("#sMaxLots").value = rk.max_lots;
   $("#settingsDlg").showModal();
 });
 $("#btnSaveSettings").addEventListener("click", () => {
   settings = {
+    ...settings,
     discount: Math.max(0.1, +$("#sDiscount").value || DEFAULT_SETTINGS.discount),
     minFee: Math.max(0, +$("#sMinFee").value || 0),
     lots: Math.max(1, Math.round(+$("#sLots").value || 1)),
+    risk: {
+      enabled: $("#sRiskEnabled").checked,
+      daily_loss_limit: Math.max(0, +$("#sDailyLimit").value || 10000),
+      max_consecutive_losses: Math.max(1, Math.round(+$("#sMaxConsec").value || 3)),
+      position_sizing: $("#sSizing").value === "fixed" ? "fixed" : "risk_parity",
+      per_trade_risk: Math.max(0, +$("#sPerTradeRisk").value || 2500),
+      max_lots: Math.max(1, Math.round(+$("#sMaxLots").value || 4)),
+    },
   };
   localStorage.setItem("sp_settings", JSON.stringify(settings));
   $("#settingsDlg").close();

@@ -309,6 +309,120 @@ def fetch_twse_shares_issued():
     return out
 
 
+# ---------- 籌碼面（三大法人買賣超、融資融券）----------
+
+def fetch_twse_institutional(iso_date):
+    """指定日期上市個股三大法人合計買賣超（張）。{code: net_lots}；拿不到回 {}。
+    T86 為扁平 fields/data 結構，最後一欄「三大法人買賣超股數」單位為股，÷1000 轉張。"""
+    data = safe_get_json(
+        "https://www.twse.com.tw/rwd/zh/fund/T86",
+        {"date": iso_to_ymd(iso_date), "selectType": "ALL", "response": "json"},
+        headers={"Connection": "close"})
+    if not data or data.get("stat") != "OK":
+        return {}
+    fields = data.get("fields", [])
+    i_code = next((i for i, f in enumerate(fields) if "證券代號" in str(f)), 0)
+    i_net = next((i for i, f in enumerate(fields) if "三大法人買賣超股數" in str(f)), None)
+    if i_net is None:
+        return {}
+    out = {}
+    for row in data.get("data", []):
+        if i_net >= len(row) or i_code >= len(row):
+            continue   # 備註/合計等短列，跳過
+        code = str(row[i_code]).strip()
+        net = parse_num(row[i_net])
+        if is_tradeable_code(code) and net is not None:
+            out[code] = round(net / 1000)   # 股 → 張
+    return out
+
+
+def fetch_twse_margin(iso_date):
+    """指定日期上市個股融資融券餘額（張）。{code: {mgn, sht, mgn0, sht0}}；拿不到回 {}。
+    個股表欄位名稱重複（融資/融券群組各有「今日餘額」），故以出現順序定位。"""
+    data = safe_get_json(
+        "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN",
+        {"date": iso_to_ymd(iso_date), "selectType": "ALL", "response": "json"},
+        headers={"Connection": "close"})
+    if not data or data.get("stat") != "OK":
+        return {}
+    table = None
+    for t in data.get("tables", []):
+        f = [str(x).strip() for x in (t.get("fields") or [])]
+        if any(x.startswith("代號") for x in f) and f.count("今日餘額") >= 2:
+            table = t
+            table["_f"] = f
+            break
+    if not table:
+        return {}
+    f = table["_f"]
+    i_code = next(i for i, x in enumerate(f) if x.startswith("代號"))
+    today = [i for i, x in enumerate(f) if x == "今日餘額"]      # [融資, 融券]
+    prev = [i for i, x in enumerate(f) if x == "前日餘額"]       # [融資, 融券]
+    if len(today) < 2 or len(prev) < 2:
+        return {}
+    out = {}
+    need = max(i_code, today[0], today[1], prev[0], prev[1])
+    for row in table.get("data", []):
+        if need >= len(row):
+            continue   # 短列（備註/合計）跳過
+        code = str(row[i_code]).strip()
+        if not is_tradeable_code(code):
+            continue
+        mgn, sht = parse_num(row[today[0]]), parse_num(row[today[1]])
+        mgn0, sht0 = parse_num(row[prev[0]]), parse_num(row[prev[1]])
+        if mgn is None and sht is None:
+            continue
+        out[code] = {"mgn": int(mgn or 0), "sht": int(sht or 0),
+                     "mgn0": int(mgn0 or 0), "sht0": int(sht0 or 0)}
+    return out
+
+
+def fetch_tpex_institutional(iso_date):
+    """上櫃個股三大法人合計買賣超（張）；openapi 僅最新日，日期不符回 {}。
+    tpex_3insti_daily_trading 的 TotalDifference 單位為股，÷1000 轉張。"""
+    data = safe_get_json("https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading")
+    out = {}
+    for r in data or []:
+        d = str(r.get("Date", "")).strip()
+        if d and roc_to_iso(d) != iso_date:
+            return {}
+        code = str(r.get("SecuritiesCompanyCode", "")).strip()
+        net = parse_num(r.get("TotalDifference"))
+        if is_tradeable_code(code) and net is not None:
+            out[code] = round(net / 1000)   # 股 → 張
+    return out
+
+
+def fetch_tpex_margin(iso_date):
+    """上櫃個股融資融券餘額（張）；openapi 僅最新日，日期不符回 {}。
+    注意：TPEx 融資融券資料常較三大法人落後一個交易日，故各自獨立判斷日期。"""
+    data = safe_get_json("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance")
+    out = {}
+    for r in data or []:
+        d = str(r.get("Date", "")).strip()
+        if d and roc_to_iso(d) != iso_date:
+            return {}
+        code = str(r.get("SecuritiesCompanyCode", "")).strip()
+        mgn = parse_num(r.get("MarginPurchaseBalance"))
+        sht = parse_num(r.get("ShortSaleBalance"))
+        mgn0 = parse_num(r.get("MarginPurchaseBalancePreviousDay"))
+        sht0 = parse_num(r.get("ShortSaleBalancePreviousDay"))
+        if is_tradeable_code(code) and (mgn is not None or sht is not None):
+            out[code] = {"mgn": int(mgn or 0), "sht": int(sht or 0),
+                         "mgn0": int(mgn0 or 0), "sht0": int(sht0 or 0)}
+    return out
+
+
+def attach_chip(stocks, inst, margin):
+    """把三大法人淨買超與融資融券餘額併入個股 dict（就地）。"""
+    for code, net in (inst or {}).items():
+        if code in stocks:
+            stocks[code]["inst"] = net
+    for code, mg in (margin or {}).items():
+        if code in stocks:
+            stocks[code].update(mg)
+
+
 # ---------- TPEx ----------
 
 def fetch_tpex_daily(iso_date):
@@ -396,6 +510,9 @@ def build_snapshot_for_date(iso_date, with_extras=False):
     for code, sh in (dt or {}).items():
         if code in stocks:
             stocks[code]["dt"] = sh
+    # 籌碼面：上市個股三大法人買賣超與融資融券（可帶歷史日期）。
+    # 上櫃個股籌碼 openapi 僅有最新日，歷史回補時不套用（缺 = 候選策略當日不觸發）。
+    attach_chip(stocks, fetch_twse_institutional(iso_date), fetch_twse_margin(iso_date))
     snap = {"date": iso_date, "stocks": stocks}
     if with_extras:
         _attach_extras(snap)
@@ -449,3 +566,6 @@ def _attach_extras(snap):
     snap["dt_sus"] = sorted((sus_t | sus_o) & set(snap["stocks"]))
     snap["punish"] = sorted(fetch_punish(iso) & set(snap["stocks"]))
     snap["notice"] = sorted(fetch_notice(iso) & set(snap["stocks"]))
+    # 籌碼面：最新日 TWSE 帶日期版 + TPEx openapi（僅最新日，日期相符才套用）
+    attach_chip(snap["stocks"], fetch_twse_institutional(iso), fetch_twse_margin(iso))
+    attach_chip(snap["stocks"], fetch_tpex_institutional(iso), fetch_tpex_margin(iso))
