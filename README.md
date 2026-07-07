@@ -106,7 +106,7 @@
 ## 系統架構
 
 ```
-GitHub Actions（平日 21:07 台北時間）
+GitHub Actions（平日晚間，21:10 起多發兜底）
   └─ scripts/daily_update.py
        1. 抓 TWSE/TPEx 收盤行情＋個股當沖統計＋處置/注意/可當沖名單 → data/history/
        2. 復盤前一日建議單 → data/reviews.json
@@ -136,7 +136,7 @@ python -m http.server 8000           # 本機預覽前端
 
 | Workflow | 觸發 | 用途 |
 | --- | --- | --- |
-| `每日更新` | 平日 21:07（台北）／手動 | 抓資料→復盤→審計→優化→選股→commit |
+| `每日更新` | 平日晚間多發（21:10/21:40/22:20/23:10/00:10 台北）／手動 | 抓資料→復盤→審計→優化→選股→commit（冪等，先成功者更新後其餘快速跳過） |
 | `歷史資料回補` | 手動 | 首次建置或補資料缺口，可選 walk-forward 重建 |
 
 Pages 採 **branch 部署**（main 根目錄、含 `.nojekyll`）：任何 push 後 GitHub 自動建置上線，無需部署 workflow。
