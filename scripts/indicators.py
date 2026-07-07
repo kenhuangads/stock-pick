@@ -109,6 +109,7 @@ def compute_stock_metrics(series):
         "dt_ratio": round(dt_ratio, 1) if dt_ratio is not None else None,
         "dt_ratio_ma5": round(dt_ratio_ma5, 1) if dt_ratio_ma5 is not None else None,
         "turnover": round(turnover, 2) if turnover is not None else None,
+        "breakeven": breakeven_ticks(today["c"]),   # 含稅費回本所需跳動檔數（2.8折基準）
         "inst_net": inst_net,
         "margin_short_ratio": margin_short_ratio,
         "short_increase": short_increase,

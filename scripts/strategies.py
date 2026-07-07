@@ -106,6 +106,13 @@ STRATEGIES = [
         "fn": lambda m: (m.get("margin_short_ratio") or 0) >= 15 and (m.get("short_increase") or 0) > 0 and m["close"] > m["open"],
         "candidate": True,
     },
+    {
+        "id": "low_breakeven",
+        "name": "低回本檔數",
+        "desc": "含稅費回本僅需 ≤ 2 個跳動檔（跳動甜蜜點的直接量化），股價只要動 1-2 檔即覆蓋成本、資金效率最高、暴露風險時間最短",
+        "fn": lambda m: (m.get("breakeven") or 99) <= 2,
+        "candidate": True,
+    },
 ]
 
 STRAT_BY_ID = {s["id"]: s for s in STRATEGIES}

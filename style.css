@@ -162,6 +162,8 @@ input[type="number"], select {
 .trades td:first-child, .trades th:first-child { text-align: left; }
 .trades .dim td { color: #5b6675; }
 .tbl-wrap { overflow-x: auto; }
+.trades.sens tr.best td { background: rgba(245,192,78,.14); }
+.trades.sens tr.best td:first-child { color: var(--gold); font-weight: 700; }
 
 /* ---------- 策略 ---------- */
 .s-card { padding: 13px 14px; }

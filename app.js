@@ -214,8 +214,9 @@ function sizeLots(p, rk) {
 }
 /* 同時算 raw（每筆固定張數全開）與 managed（部位風險預算＋每日虧損斷路器）。
    斷路器：依綜合分數（信心）順序進場，當日累計實現虧損 ≤ −上限、或連虧 N 筆 → 停開新倉。 */
-function recomputeDay(day) {
+function recomputeDay(day, limitOverride) {
   const rk = riskParams();
+  const limit = limitOverride != null ? limitOverride : rk.daily_loss_limit;
   const lots0 = settings.lots;
   let rawNet = 0, rawWins = 0, filled = 0;
   const rawByCode = {};
@@ -237,7 +238,7 @@ function recomputeDay(day) {
       // 進場前風險閘門：這筆觸停損的最大淨虧損必須 ≤ 當日剩餘額度，否則不進場。
       // 因實際出場價 ≥ 停損價，故此規則在數學上保證單日淨虧損永不超過上限。
       const worstLoss = -tradeNet(p.fill_price, p.stop, lots).net;   // 觸停損的最大虧損（含費用，正值）
-      const remaining = rk.daily_loss_limit + mNet;                  // 剩餘可承受虧損
+      const remaining = limit + mNet;                                // 剩餘可承受虧損（limit 可為 Infinity）
       if (worstLoss > remaining) { skipped++; ann[p.code] = { taken: false, lots, reason: "budget" }; return; }
     }
     mNet += r.net; taken++;
@@ -249,6 +250,64 @@ function recomputeDay(day) {
   return { rows, net: mNet, rawNet, filled, wins: mWins, taken, skipped, halted,
     winRate: taken ? (mWins / taken) * 100 : null,
     rawWinRate: filled ? (rawWins / filled) * 100 : null };
+}
+
+/* 敏感度：在指定每日上限下，跑完整個復盤期並匯總（累計損益、勝率、最慘單日、最大回撤、報酬÷回撤）。
+   其餘風控參數（部位大小、連虧停手）沿用目前設定，只變動「每日上限」以隔離其效果。 */
+function aggregateAtLimit(days, limit) {
+  let cum = 0, peak = 0, maxDD = 0, taken = 0, wins = 0, worst = 0;
+  days.forEach((d) => {
+    const r = recomputeDay(d, limit);
+    cum += r.net;
+    peak = Math.max(peak, cum);
+    maxDD = Math.max(maxDD, peak - cum);
+    taken += r.taken; wins += r.wins;
+    worst = Math.min(worst, r.net);
+  });
+  const score = maxDD > 0 ? cum / maxDD : (cum > 0 ? Infinity : 0);   // Calmar 式：報酬÷最大回撤
+  return { limit, net: cum, winRate: taken ? (wins / taken) * 100 : null, worst, maxDD, score };
+}
+function renderRiskSensitivity(days) {
+  const host = $("#riskSensitivity");
+  const rk = riskParams();
+  if (!rk.enabled || !days.length) { host.innerHTML = ""; return; }
+  const limits = [10000, 15000, 20000, 30000, Infinity];
+  const rows = limits.map((L) => aggregateAtLimit(days, L));
+  // 風險調整最佳只在「有上限」的組合中挑（不推薦「無上限」＝等於拿掉風控）
+  const capped = rows.filter((r) => isFinite(r.limit));
+  const best = capped.reduce((a, b) => (b.score > a.score ? b : a));
+  const fmtL = (L) => (isFinite(L) ? "$" + fmt(L) : "無上限");
+  const scoreTxt = (s) => (isFinite(s) ? s.toFixed(2) : "∞");
+  const trs = rows.map((r) => {
+    const cls = [r.limit === best.limit ? "best" : "", r.limit === rk.daily_loss_limit ? "cur" : ""].join(" ");
+    return `<tr class="${cls}">
+      <td>${fmtL(r.limit)}${r.limit === rk.daily_loss_limit ? " ◀目前" : ""}${r.limit === best.limit ? " ⭐" : ""}</td>
+      <td class="${signCls(r.net)}">${signTxt(r.net)}${fmt(r.net)}</td>
+      <td>${r.winRate == null ? "–" : r.winRate.toFixed(0) + "%"}</td>
+      <td class="down">${fmt(r.worst)}</td>
+      <td class="down">-${fmt(r.maxDD)}</td>
+      <td><b>${scoreTxt(r.score)}</b></td>
+    </tr>`;
+  }).join("");
+  const canApply = best.limit !== rk.daily_loss_limit;
+  host.innerHTML = `<details class="explain">
+    <summary>📊 每日上限敏感度分析（風險調整後最佳：<b>${fmtL(best.limit)}</b>）</summary>
+    <div class="tbl-wrap"><table class="trades sens">
+      <tr><th>每日虧損上限</th><th>累計損益</th><th>勝率</th><th>最慘單日</th><th>最大回撤</th><th>報酬÷回撤</th></tr>
+      ${trs}</table></div>
+    <p class="muted small">「報酬÷回撤」＝累計淨損益 ÷ 最大回撤（Calmar 式，越高越好）。純看累計損益幾乎必然「上限越高越賺」
+    ——因為放行更多正期望值的單。⭐ 為<b>有上限</b>組合中風險調整最佳者（刻意不推薦「無上限」＝等於拿掉風控）。
+    ${canApply ? `<button class="btn" id="btnApplyBestLimit" style="margin-top:8px">一鍵套用 ${fmtL(best.limit)} 為每日上限</button>` : "（⭐ 已是你目前的設定）"}</p>
+    <p class="muted small">⚠️ <b>這正是「別把每日上限交給優化器」的活教材</b>：目前僅 ${days.length} 天樣本，少數幾筆尾部大賺（被低上限跳過的贏家）
+    會主導結果，常讓「無上限」連風險調整比都偏高——但那不代表真的該拿掉風控，只代表樣本太少、不可盡信。每日上限是你能承受多少單日虧損的<b>風險偏好</b>，
+    此表供你看清取捨，數字由你拍板；待復盤天數累積夠多，這裡的結論才會穩定。</p>
+  </details>`;
+  const btn = $("#btnApplyBestLimit");
+  if (btn) btn.addEventListener("click", () => {
+    settings.risk = { ...rk, daily_loss_limit: best.limit };
+    localStorage.setItem("sp_settings", JSON.stringify(settings));
+    renderReview();
+  });
 }
 function renderReview() {
   const days = [...DB.reviews].sort((a, b) => a.date.localeCompare(b.date));
@@ -282,6 +341,8 @@ function renderReview() {
        單日虧損破 ${fmt(rk.daily_loss_limit)} 的天數：<b class="down">原始 ${rawBreach} 天 → 風控後 ${mBreach} 天</b>；
        未套風控的累計損益為 ${signTxt(totRaw)}${fmt(totRaw)}（每筆固定 ${settings.lots} 張）。可在 ⚙️ 設定調整。`
     : `⚠️ 每日虧損風控已關閉，顯示為每筆固定 ${settings.lots} 張全開的原始結果。可在 ⚙️ 設定開啟。`;
+
+  renderRiskSensitivity(days);
 
   const css = getComputedStyle(document.documentElement);
   const cUp = css.getPropertyValue("--up").trim(), cDown = css.getPropertyValue("--down").trim();
