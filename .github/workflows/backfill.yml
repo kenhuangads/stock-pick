@@ -13,13 +13,13 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: daily-update
   cancel-in-progress: false
 
+# Pages 採 branch 部署（main 根目錄）：回補資料 commit push 後 GitHub 自動建置，
+# 無需部署 job（與 daily.yml 一致）。
 jobs:
   backfill:
     runs-on: ubuntu-latest
@@ -34,17 +34,9 @@ jobs:
       - name: Walk-forward 重建（復盤 + 策略權重）
         if: ${{ inputs.rebuild }}
         run: python scripts/daily_update.py --rebuild
-      - name: Commit
+      - name: Commit（push 後 Pages 自動建置）
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A data/
           git diff --cached --quiet || { git commit -m "chore(data): backfill ${{ inputs.days }} days"; git push; }
-
-  deploy:
-    needs: backfill
-    uses: ./.github/workflows/pages.yml
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
