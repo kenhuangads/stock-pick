@@ -100,6 +100,7 @@ function stockCard(p, rank) {
       ${rank ? `<span class="rank">#${rank}</span>` : ""}
       <span class="code">${p.code}</span><span class="name">${p.name}</span>
       <span class="mkt">${p.market === "tpex" ? "上櫃" : "上市"}</span>
+      ${p.fallback ? `<span class="badge fb" title="未達完整門檻（活躍策略命中不足），為湊滿觀察名單的遞補標的，信心較低">遞補</span>` : ""}
       <span class="score" title="綜合分數（策略權重加總）">${p.score}</span>
     </div>
     <div class="px">收盤 <b>${fmt2(p.close)}</b>
@@ -141,8 +142,10 @@ function renderPicks() {
     }, 0);
     riskSummary = `<br>🛡️ 依建議張數全下、全部觸停損的最壞合計約 <b>−${fmt(worstSum)}</b>；你的日限 <b>−${fmt(rk.daily_loss_limit)}</b>——盤中實際請依風險閘門順序進場（超額即停，卡片有逐檔標註）。`;
   }
+  const nFb = (d.picks || []).filter((p) => p.fallback).length;
   $("#picksInfo").innerHTML = n
-    ? `📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔
+    ? `📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
+        ? `（完整門檻 ${n - nFb} 檔＋<b>遞補 ${nFb} 檔</b>——弱勢窗口活躍策略較少，遞補標的訊號較弱、信心自酌）` : ""}
        <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。${shifted || exitMode
         ? `<br>📐 建議價已套用價格模型（進場 ${shiftTxt(sh.entry ?? 0)}、停利 ${shiftTxt(sh.target ?? 0)}、停損 ${shiftTxt(sh.stop ?? 0)}${exitMode}，依復盤自動迭代）。`
         : ""}${riskSummary}`

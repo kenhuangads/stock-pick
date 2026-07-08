@@ -194,16 +194,33 @@ def make_pick(m, score, hits, discount, price_shifts=None):
 
 def screen(market, cfg, weights, price_shifts=None):
     """全市場掃描 → 依綜合分數排序的推薦清單。
-    門檻只計「有權重的策略」命中數，候選/停用策略純追蹤、不影響入選。"""
-    picks = []
+    門檻只計「有權重的策略」命中數，候選/停用策略純追蹤、不影響入選。
+
+    遞補機制：弱勢窗口下活躍策略減少、完整門檻可能選不滿 max_picks——
+    此時從「通過基礎濾網且有觸發訊號（含候選/停用追蹤）」者依
+    (活躍命中數, 綜合分數, 總命中數, 振幅) 遞補湊滿，並標記 fallback=True
+    讓前端明示信心等級較低。遞補單照常復盤，維持樣本累積讓停用策略有機會翻身。"""
+    picks, bench = [], []
     discount = cfg["fees"]["default_discount"]
+    min_trig = cfg.get("min_strategies_triggered", 2)
+    max_picks = cfg.get("max_picks", 8)
     for m in market.values():
         if not passes_base_filters(m, cfg):
             continue
         score, hits = evaluate(m, weights)
-        active_hits = [h for h in hits if weights.get(h, 0) > 0]
-        if len(active_hits) < cfg.get("min_strategies_triggered", 2) or score <= 0:
+        if not hits:
             continue
-        picks.append(make_pick(m, score, hits, discount, price_shifts))
+        active_hits = [h for h in hits if weights.get(h, 0) > 0]
+        p = make_pick(m, score, hits, discount, price_shifts)
+        if len(active_hits) >= min_trig and score > 0:
+            picks.append(p)
+        else:
+            bench.append((len(active_hits), score, len(hits), p))
     picks.sort(key=lambda p: (-p["score"], -p["amp_avg"]))
-    return picks[: cfg.get("max_picks", 8)]
+    picks = picks[:max_picks]
+    if len(picks) < max_picks and bench:
+        bench.sort(key=lambda x: (-x[0], -x[1], -x[2], -x[3]["amp_avg"]))
+        for _, _, _, p in bench[: max_picks - len(picks)]:
+            p["fallback"] = True
+            picks.append(p)
+    return picks
