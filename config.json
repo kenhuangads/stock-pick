@@ -1,6 +1,6 @@
 {
   "min_history_days": 22,
-  "history_window": 60,
+  "history_window": 0,
   "base_filters": {
     "price_min": 10,
     "price_max": 1000,
@@ -31,9 +31,12 @@
   "price_optimizer": {
     "window_days": 20,
     "min_trades": 12,
-    "objective": "winrate",
-    "entry_grid": [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4],
+    "objective": "payoff",
+    "min_payoff": 1.2,
+    "entry_grid": [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
     "exit_grid": [-0.1, -0.05, 0, 0.05, 0.1],
+    "trail_grid": [0, 0.3],
+    "tstop_grid": [null, 36],
     "target_fill_rate": 0.67,
     "improve_margin_pct": 5
   },

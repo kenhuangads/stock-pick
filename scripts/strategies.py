@@ -172,15 +172,19 @@ def shifted_prices(c, day_range, shifts):
 
 def make_pick(m, score, hits, discount, price_shifts=None):
     """由 CDP＋價格模型偏移產生隔日建議買賣價（NL 掛買、NH 停利、AL 停損）。
-    同時保留 cdp_base（原始價位與當日振幅）供價格迭代重放歷史使用。"""
+    同時記錄出場引擎參數（移動停利距離/時間停損，由價格模型 A/B 實證決定開關）
+    與 cdp_base（原始價位與當日振幅）供價格迭代重放歷史使用。"""
     c = m["cdp"]
     day_range = m["high"] - m["low"]
     entry, target, stop = shifted_prices(c, day_range, price_shifts)
+    trail_mult = (price_shifts or {}).get("trail") or 0
     return {
         "code": m["code"], "name": m["name"], "market": m["market"],
         "close": m["close"], "chg_pct": m["chg_pct"],
         "score": score, "strategies": hits,
         "entry": entry, "target": target, "stop": stop, "ah": c["ah"],
+        "trail_dist": round(trail_mult * day_range, 2) if trail_mult else None,
+        "tstop_bar": (price_shifts or {}).get("tstop"),
         "cdp_base": {"nl": c["nl"], "nh": c["nh"], "al": c["al"], "r": round(day_range, 2)},
         "breakeven_ticks": breakeven_ticks(entry, discount),
         "amp_avg": m["amp_avg"], "vol_lots": m["vol_lots"],

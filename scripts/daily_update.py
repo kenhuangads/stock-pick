@@ -14,7 +14,7 @@
 """
 import json
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -121,6 +121,8 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         print(f"[rebuild] 歷史僅 {len(snaps)} 天，不足 {min_days}+1 天，略過")
         return [], None, None
     reviews, strat_doc, price_doc = [], None, None
+    # Yahoo 5 分K只回溯約 60 天：更早的日期抓了必空，直接跳過抓取（避免整輪失敗重試拖慢 rebuild）
+    intraday_cutoff = (date.today() - timedelta(days=55)).isoformat()
     for i in range(min_days, len(snaps)):
         upto = snaps[: i]                      # 只看 i-1 為止的資料
         latest_date, market = build_market(upto)
@@ -129,7 +131,7 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         picks = screen(market, cfg, weights, shifts)
         picks_doc = {"generated_on": latest_date, "picks": picks}
         trade_date = snaps[i]["date"]
-        bars = (ensure_intraday(trade_date, picks) if allow_fetch
+        bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff
                 else load_intraday(trade_date))
         entry = run_review(picks_doc, snaps[i], cfg, bars)   # 用第 i 天實際行情驗證
         reviews.append(entry)

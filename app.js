@@ -77,6 +77,19 @@ document.querySelectorAll(".tab").forEach((btn) =>
 );
 
 /* ---------- 共用：個股卡片 ---------- */
+function riskBadgeHtml(p) {
+  // 今日選股的事前風險標註：以建議張數計「觸停損最壞虧損」，比照復盤的風險閘門口徑
+  const rk = riskParams();
+  if (!rk.enabled || p.entry == null || p.stop == null || p.entry <= p.stop) return "";
+  const lots = sizeLots({ fill_price: p.entry, stop: p.stop }, rk);
+  const worst = -tradeNet(p.entry, p.stop, lots).net;
+  const worst1 = lots === 1 ? worst : -tradeNet(p.entry, p.stop, 1).net;
+  if (worst1 > rk.daily_loss_limit)
+    return `<div class="risk-line block">🛑 一張最壞 −${fmt(worst1)}，超過日限 −${fmt(rk.daily_loss_limit)}（風控會跳過此單）</div>`;
+  if (worst > rk.daily_loss_limit * 0.5)
+    return `<div class="risk-line warn">⚠️ 建議 ${lots} 張・最壞 −${fmt(worst)}（吃掉大半日限額度）</div>`;
+  return `<div class="risk-line ok">🛡️ 建議 ${lots} 張・最壞 −${fmt(worst)}</div>`;
+}
 function stockCard(p, rank) {
   const tags = (p.strategies || [])
     .map((id) => `<span class="tag" title="${stratMeta[id]?.desc || ""}">${stratMeta[id]?.name || id}</span>`)
@@ -104,6 +117,7 @@ function stockCard(p, rank) {
       ${p.dt_ratio != null ? `<span>當沖率 ${fmt2(p.dt_ratio)}%</span>` : ""}
       ${p.breakeven_ticks != null ? `<span>回本約 ${p.breakeven_ticks} 檔</span>` : ""}
     </div>
+    ${riskBadgeHtml(p)}
   </div>`;
 }
 
@@ -114,11 +128,24 @@ function renderPicks() {
   const n = d.picks?.length || 0;
   const sh = d.price_shifts || {};
   const shifted = ["entry", "target", "stop"].some((k) => sh[k]);
+  const exitMode = (sh.trail || sh.tstop != null)
+    ? `、出場引擎：移動停利 ${sh.trail ? sh.trail + "R" : "關"}／時間停損 ${sh.tstop != null ? "12:00" : "關"}（A/B 實證擇優）` : "";
+  // 事前風險總覽：全下（依建議張數）觸停損的最壞合計
+  const rk = riskParams();
+  let riskSummary = "";
+  if (rk.enabled && n) {
+    const worstSum = d.picks.reduce((s, p) => {
+      if (p.entry == null || p.stop == null || p.entry <= p.stop) return s;
+      const lots = sizeLots({ fill_price: p.entry, stop: p.stop }, rk);
+      return s + -tradeNet(p.entry, p.stop, lots).net;
+    }, 0);
+    riskSummary = `<br>🛡️ 依建議張數全下、全部觸停損的最壞合計約 <b>−${fmt(worstSum)}</b>；你的日限 <b>−${fmt(rk.daily_loss_limit)}</b>——盤中實際請依風險閘門順序進場（超額即停，卡片有逐檔標註）。`;
+  }
   $("#picksInfo").innerHTML = n
     ? `📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔
-       <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。${shifted
-        ? `<br>📐 建議價已套用價格模型偏移（進場 ${shiftTxt(sh.entry)}、停利 ${shiftTxt(sh.target)}、停損 ${shiftTxt(sh.stop)}，依復盤自動迭代，詳見「每日復盤」頁）。`
-        : ""}`
+       <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。${shifted || exitMode
+        ? `<br>📐 建議價已套用價格模型（進場 ${shiftTxt(sh.entry ?? 0)}、停利 ${shiftTxt(sh.target ?? 0)}、停損 ${shiftTxt(sh.stop ?? 0)}${exitMode}，依復盤自動迭代）。`
+        : ""}${riskSummary}`
     : `本日基礎濾網後沒有符合門檻的標的（或歷史資料尚在累積）。可到「自訂選股」放寬條件。`;
   $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
@@ -329,11 +356,25 @@ function renderReview() {
   const rawBreach = daily.filter((d) => d.rawNet < -rk.daily_loss_limit).length;
   const mBreach = daily.filter((d) => d.net < -rk.daily_loss_limit).length;
 
+  // 大賺小賠儀表板：以風控後實際進場的每筆淨損益計
+  const mNets = [];
+  daily.forEach((d) => d.rows.forEach((p) => { if (p._m?.taken) mNets.push(p._m.net); }));
+  const mW = mNets.filter((x) => x > 0), mL = mNets.filter((x) => x <= 0);
+  const avgW = mW.length ? mW.reduce((a, b) => a + b, 0) / mW.length : null;
+  const avgL = mL.length ? -mL.reduce((a, b) => a + b, 0) / mL.length : null;
+  const payoff = avgW != null && avgL ? avgW / avgL : null;
+  const pf = mL.length ? mW.reduce((a, b) => a + b, 0) / -mL.reduce((a, b) => a + b, 0) : null;
+  const expectPer = mNets.length ? Math.round(mNets.reduce((a, b) => a + b, 0) / mNets.length) : null;
+
   $("#reviewStats").innerHTML = `
     <div class="stat"><div class="lb">累計淨損益<span class="muted">（風控後）</span></div><div class="v ${signCls(totNet)}">${signTxt(totNet)}${fmt(totNet)}</div></div>
     <div class="stat"><div class="lb">總勝率<span class="muted">（風控後）</span></div><div class="v">${totTaken ? ((totWins / totTaken) * 100).toFixed(1) : "–"}%</div></div>
+    <div class="stat"><div class="lb">賺賠比<span class="muted">（均賺/均賠）</span></div><div class="v ${payoff != null ? (payoff >= 1.2 ? "up" : payoff < 1 ? "down" : "") : ""}">${payoff != null ? payoff.toFixed(2) : "–"}</div></div>
+    <div class="stat"><div class="lb">獲利因子<span class="muted">（總賺/總賠）</span></div><div class="v ${pf != null ? (pf >= 1 ? "up" : "down") : ""}">${pf != null ? pf.toFixed(2) : "–"}</div></div>
+    <div class="stat"><div class="lb">每筆期望值</div><div class="v ${signCls(expectPer)}">${expectPer != null ? signTxt(expectPer) + fmt(expectPer) : "–"}</div></div>
     <div class="stat"><div class="lb">最慘單日<span class="muted">（風控後）</span></div><div class="v ${signCls(worstM)}">${signTxt(worstM)}${fmt(worstM)}</div></div>
-    <div class="stat"><div class="lb">觸發斷路器</div><div class="v">${haltDays} 天</div></div>`;
+    <div class="stat"><div class="lb">觸發斷路器</div><div class="v">${haltDays} 天</div></div>
+    <div class="stat"><div class="lb">復盤天數</div><div class="v">${daily.length}</div></div>`;
 
   $("#riskNote").innerHTML = rk.enabled
     ? `🛡️ 已套用每日虧損風控：部位<b>${rk.position_sizing === "risk_parity" ? `風險預算 ${fmt(rk.per_trade_risk)} 元/筆` : `固定 ${rk.lots} 張`}</b>、
@@ -374,7 +415,7 @@ function renderReview() {
   });
 
   $("#reviewList").innerHTML = [...daily].reverse().map((d, idx) => {
-    const reasonTxt = { target: "停利", stop: "停損", close: "收盤沖銷", nofill: "未成交" };
+    const reasonTxt = { target: "停利", trail: "移動停利", stop: "停損", timeout: "時間停損", close: "收盤沖銷", nofill: "未成交" };
     const rows = d.rows.map((p) => {
       if (!p.filled) return `<tr class="dim"><td>${p.code} ${p.name}</td><td>${fmt2(p.entry)}</td>
         <td colspan="3">未成交（最低 ${fmt2(p.day_low)} 未觸價）</td><td>–</td></tr>`;
@@ -409,16 +450,21 @@ function renderPriceModel() {
   const s = pm.stats, sh = pm.shifts || {};
   $("#priceModelCard").hidden = false;
   $("#priceModelInfo").innerHTML =
-    `進出場建議價＝CDP 基準價＋偏移 ×「訊號日振幅 R」，偏移每日依最近 <b>${pm.window_days}</b> 個復盤日重放搜尋、
-     績效明顯改善才切換（防止雜訊抖動）。目前偏移：進場 <b>${shiftTxt(sh.entry ?? 0)}</b> ·
-     停利 <b>${shiftTxt(sh.target ?? 0)}</b> · 停損 <b>${shiftTxt(sh.stop ?? 0)}</b>
+    `進出場建議價＝CDP 基準價＋偏移 ×「訊號日振幅 R」，偏移與<b>出場引擎</b>（地板式移動停利、12:00 時間停損）
+     每日依最近 <b>${pm.window_days}</b> 個復盤日重放 A/B 實證、績效明顯改善才切換（防止雜訊抖動）。
+     目前：進場 <b>${shiftTxt(sh.entry ?? 0)}</b> · 停利 <b>${shiftTxt(sh.target ?? 0)}</b> ·
+     停損 <b>${shiftTxt(sh.stop ?? 0)}</b> · 移動停利 <b>${sh.trail ? sh.trail + "R" : "關"}</b> ·
+     時間停損 <b>${sh.tstop != null ? "12:00" : "關"}</b>
      ${s.net != null && s.net_baseline != null ? `｜窗口淨損益 <b>${fmt(s.net)}</b> vs 原始 CDP <b>${fmt(s.net_baseline)}</b> 元` : ""}`;
   const frCls = s.fill_target == null ? "" : (s.fill_rate ?? 0) >= s.fill_target ? "up" : "down";
+  const tRate = (s.target_rate ?? 0) + (s.trail_rate ?? 0);
   $("#priceModelStats").innerHTML = `
     <div class="stat"><div class="lb">掛單成交率${s.fill_target != null ? `（目標 ≥${s.fill_target}%）` : ""}</div>
       <div class="v ${frCls}">${s.fill_rate ?? "–"}%</div></div>
-    <div class="stat"><div class="lb">停利出場占比</div><div class="v up">${s.target_rate ?? "–"}%</div></div>
+    <div class="stat"><div class="lb">賺賠比（窗口）</div><div class="v ${s.payoff != null ? (s.payoff >= 1.2 ? "up" : s.payoff < 1 ? "down" : "") : ""}">${s.payoff ?? "–"}</div></div>
+    <div class="stat"><div class="lb">停利出場占比${s.trail_rate ? "（含移動）" : ""}</div><div class="v up">${s.fill_rate != null ? tRate.toFixed(1) : "–"}%</div></div>
     <div class="stat"><div class="lb">停損出場占比</div><div class="v down">${s.stop_rate ?? "–"}%</div></div>
+    ${s.timeout_rate ? `<div class="stat"><div class="lb">時間停損占比</div><div class="v">${s.timeout_rate}%</div></div>` : ""}
     <div class="stat"><div class="lb">掛價過低錯失率</div><div class="v">${s.runaway_rate ?? "–"}%</div></div>`;
   const log = pm.log || [];
   $("#priceModelLog").innerHTML = log.length
