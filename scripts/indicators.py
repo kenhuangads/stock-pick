@@ -110,6 +110,7 @@ def compute_stock_metrics(series):
         "dt_ratio_ma5": round(dt_ratio_ma5, 1) if dt_ratio_ma5 is not None else None,
         "turnover": round(turnover, 2) if turnover is not None else None,
         "breakeven": breakeven_ticks(today["c"]),   # 含稅費回本所需跳動檔數（2.8折基準）
+        "closes20": [round(c, 2) for c in closes[-20:]],   # 近20日收盤（卡片 sparkline 用；market.json 輸出前剔除）
         "inst_net": inst_net,
         "margin_short_ratio": margin_short_ratio,
         "short_increase": short_increase,
@@ -140,6 +141,26 @@ def build_market(snapshots):
         }
         market[code] = m
     return latest["date"], market
+
+
+def market_breadth(snapshots, ma=5):
+    """市場寬度＝上漲家數／(上漲＋下跌)，全市場等權、不需額外資料源。
+    回傳 (最新一日寬度, 近 ma 日平均寬度)；快照不足回 (None, None)。
+    寬度均值 < 0.5 代表跌多漲少的空方環境——70 日實證該環境下隔日當沖平均為負。"""
+    if len(snapshots) < 2:
+        return None, None
+    vals = []
+    for prev, cur in zip(snapshots[-(ma + 1):-1], snapshots[-ma:]):
+        up = dn = 0
+        for code, k in cur["stocks"].items():
+            p = prev["stocks"].get(code)
+            if p and p["c"]:
+                if k["c"] > p["c"]:
+                    up += 1
+                elif k["c"] < p["c"]:
+                    dn += 1
+        vals.append(up / (up + dn) if up + dn else 0.5)
+    return vals[-1], sum(vals) / len(vals)
 
 
 def breakeven_ticks(price: float, discount: float = 0.28) -> int:

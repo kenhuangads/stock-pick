@@ -31,6 +31,14 @@
 """
 
 
+from indicators import round_tick
+
+
+def limit_down_price(prev_close):
+    """台股當日跌停價 ≈ 前收 × 0.9（對齊 tick，取略高的一側＝較保守的修正觸發）。"""
+    return round_tick(prev_close * 0.9, "up") if prev_close else None
+
+
 def trade_fees(buy_price, sell_price, lots, fees_cfg, discount=None):
     shares = lots * 1000
     disc = discount if discount is not None else fees_cfg["default_discount"]
@@ -53,28 +61,43 @@ def bars_match_ohlc(bars, ohlc, tol=0.005, min_bars=40):
     return True
 
 
-def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None):
+def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
+                   strict_fill=False, limit_dn=None):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
     ohlc: {o,h,l,c} 日K；bars: [[o,h,l,c],...] 5分K（可 None）。
     trail_dist: 地板式移動停利距離（絕對價差，None/0=關）；tstop_bar: 時間停損 bar index（None=關）。
+    strict_fill: 穿價成交——限價買單需「跌破掛價」（bar 低 < 掛價）或開盤已低於掛價才算成交；
+      恰好觸價（低==掛價）視為排隊買不到（真實市場的排隊風險，回測慣例的保守假設）。
+    limit_dn: 當日跌停價——停損觸發根若已觸及跌停，市價停損單最差以跌停價成交
+      （跌停鎖死時掛單堆積、成交價不可能優於跌停，修正尾部風險低估）。
     出場理由：target 停利｜trail 移動停利｜stop 停損｜timeout 時間停損｜close 收盤沖銷｜nofill 未成交。"""
+    def stop_px(px, bl):
+        # 停損出場價修正：觸及跌停的根，最差以跌停價成交
+        if limit_dn is not None and bl <= limit_dn:
+            return min(px, limit_dn) if px is not None else limit_dn
+        return px
+
     if bars:
         fill = None
         armed, peak = False, None   # 觸及停利價後啟動移動停利追蹤
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
-                if bl <= entry:
-                    fill = min(entry, bo)
-                    if fill <= stop:
-                        # 跳空直接穿越停損：停損單即刻觸發，以成交價出場（僅損費用）
-                        return True, fill, fill, "stop", "intraday"
-                    if bl <= stop:
-                        return True, fill, stop, "stop", "intraday"
+                if bo <= entry:
+                    fill = bo               # 開盤即低於掛價 → 以開盤價成交（必成）
+                elif (bl < entry) if strict_fill else (bl <= entry):
+                    fill = entry            # 盤中（穿）觸掛價成交
+                else:
+                    continue
+                if fill <= stop:
+                    # 跳空直接穿越停損：停損單即刻觸發，以成交價出場（僅損費用）
+                    return True, fill, stop_px(fill, bl), "stop", "intraday"
+                if bl <= stop:
+                    return True, fill, stop_px(stop, bl), "stop", "intraday"
                 continue
             if not armed:
                 if bl <= stop:
-                    return True, fill, min(stop, bo), "stop", "intraday"
+                    return True, fill, stop_px(min(stop, bo), bl), "stop", "intraday"
                 if bh >= target:
                     if trail_dist:
                         armed, peak = True, bh   # 啟動移動停利，讓獲利多跑
@@ -98,25 +121,29 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
         return True, fill, ohlc["c"], "close", "intraday"
 
     # fallback：日K保守規則（順序未知，悲觀假設；無法模擬移動停利/時間停損）
-    if ohlc["l"] > entry:
+    if ohlc["o"] <= entry:
+        fill = ohlc["o"]
+    elif (ohlc["l"] < entry) if strict_fill else (ohlc["l"] <= entry):
+        fill = entry
+    else:
         return False, None, None, "nofill", "daily"
-    fill = min(entry, ohlc["o"])
     if fill <= stop:
-        return True, fill, fill, "stop", "daily"   # 開盤跳空穿越停損：視同開盤即停損
+        return True, fill, stop_px(fill, ohlc["l"]), "stop", "daily"   # 開盤跳空穿越停損：視同開盤即停損
     if ohlc["l"] <= stop:
-        return True, fill, stop, "stop", "daily"
+        return True, fill, stop_px(stop, ohlc["l"]), "stop", "daily"
     if ohlc["h"] >= target:
         return True, fill, target, "target", "daily"
     return True, fill, ohlc["c"], "close", "daily"
 
 
-def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None):
+def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
     """回傳含成交/出場/損益的復盤紀錄。ohlc: 交易日的 {o,h,l,c}；bars: 當日 5 分K。"""
     r = {
         "code": pick["code"], "name": pick["name"], "market": pick.get("market"),
         "score": pick["score"], "strategies": pick["strategies"],
         "entry": pick["entry"], "target": pick["target"], "stop": pick["stop"],
         "trail_dist": pick.get("trail_dist"), "tstop_bar": pick.get("tstop_bar"),
+        "prev_close": pick.get("close"),   # 訊號日收盤＝交易日的「前收」，供跌停價/重放使用
         "cdp_base": pick.get("cdp_base"),  # 原始 CDP 價位與當日振幅，供價格模型重放迭代
         "day_open": ohlc["o"], "day_high": ohlc["h"], "day_low": ohlc["l"], "day_close": ohlc["c"],
         "filled": False, "fill_price": None, "exit_price": None, "exit_reason": None,
@@ -125,9 +152,12 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None):
     }
     if bars and not bars_match_ohlc(bars, ohlc):
         bars = None  # 5分K與官方日K不符（錯位/缺漏），退回日K保守模擬
+    sim_cfg = sim_cfg or {}
     filled, fill, exit_price, reason, mode = simulate_trade(
         pick["entry"], pick["target"], pick["stop"], ohlc, bars,
-        pick.get("trail_dist"), pick.get("tstop_bar"))
+        pick.get("trail_dist"), pick.get("tstop_bar"),
+        strict_fill=sim_cfg.get("strict_fill", False),
+        limit_dn=limit_down_price(pick.get("close")))
     r["sim_mode"], r["exit_reason"] = mode, reason
     if not filled:
         return r
@@ -153,7 +183,8 @@ def run_review(picks_doc, trade_snapshot, cfg, intraday=None):
         k = trade_snapshot["stocks"].get(pick["code"])
         if not k:
             continue  # 停牌等情況：無資料不計
-        results.append(simulate_pick(pick, k, cfg["fees"], lots, intraday.get(pick["code"])))
+        results.append(simulate_pick(pick, k, cfg["fees"], lots, intraday.get(pick["code"]),
+                                     cfg.get("simulation")))
     filled = [r for r in results if r["filled"]]
     wins = [r for r in filled if r["net"] > 0]
     return {

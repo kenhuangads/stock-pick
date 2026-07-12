@@ -9,7 +9,8 @@
     "min_amp20_pct": 2.5,
     "exclude_punish": true,
     "exclude_notice": true,
-    "require_daytrade_eligible": true
+    "require_daytrade_eligible": true,
+    "min_chg_pct": 5
   },
   "max_picks": 8,
   "min_strategies_triggered": 2,
@@ -33,15 +34,42 @@
     "min_trades": 12,
     "objective": "payoff",
     "min_payoff": 1.2,
-    "entry_grid": [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
-    "exit_grid": [-0.1, -0.05, 0, 0.05, 0.1],
-    "trail_grid": [0, 0.3],
-    "tstop_grid": [null, 36],
+    "entry_grid": [
+      -0.1,
+      -0.05,
+      0,
+      0.05,
+      0.1,
+      0.15,
+      0.2,
+      0.25,
+      0.3,
+      0.35,
+      0.4,
+      0.45,
+      0.5
+    ],
+    "exit_grid": [
+      -0.1,
+      -0.05,
+      0,
+      0.05,
+      0.1
+    ],
+    "trail_grid": [
+      0,
+      0.3
+    ],
+    "tstop_grid": [
+      null,
+      36
+    ],
     "target_fill_rate": 0.67,
     "improve_margin_pct": 5
   },
   "simulation": {
-    "lots_per_trade": 1
+    "lots_per_trade": 1,
+    "strict_fill": true
   },
   "risk": {
     "daily_loss_limit": 10000,
@@ -50,5 +78,10 @@
     "per_trade_risk": 2500,
     "max_lots": 4,
     "lots": 1
+  },
+  "regime_filter": {
+    "enabled": true,
+    "breadth_ma": 5,
+    "min_breadth": 0.5
   }
 }

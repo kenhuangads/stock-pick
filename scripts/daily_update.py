@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import twstock
-from indicators import build_market
+from indicators import build_market, market_breadth
 from strategies import screen, evaluate, STRATEGIES, default_weight
 from review import run_review
 from optimize import run_optimize
@@ -59,12 +59,24 @@ def weights_from_doc(doc):
     return weights
 
 
+def regime_state(snapshots, cfg):
+    """大盤環境：市場寬度均值 ≥ 門檻為多方。enabled 時空方環境當晚不出建議單
+    （walk-forward 實證：空方環境的隔日當沖單平均為負期望值，不出手就是加分）。"""
+    rcfg = cfg.get("regime_filter") or {}
+    b, bma = market_breadth(snapshots, rcfg.get("breadth_ma", 5))
+    bull = (bma is None) or (bma >= rcfg.get("min_breadth", 0.5))
+    return {"breadth": round(b, 3) if b is not None else None,
+            "breadth_ma": round(bma, 3) if bma is not None else None,
+            "bull": bull, "enabled": bool(rcfg.get("enabled"))}
+
+
 def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc):
     """由（時間排序的）快照序列產生 market/picks/strategies/price_model 輸出。"""
     latest_date, market = build_market(snapshots)
     weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
     shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
-    picks = screen(market, cfg, weights, shifts)
+    regime = regime_state(snapshots, cfg)
+    picks = [] if (regime["enabled"] and not regime["bull"]) else screen(market, cfg, weights, shifts)
     for m in market.values():  # 供前端自訂選股使用的個股觸發標記
         score, hits = evaluate(m, weights)
         m["score"], m["strategies"] = score, hits
@@ -73,13 +85,17 @@ def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc):
         "generated_at": datetime.now(TAIPEI).isoformat(timespec="seconds"),
         "weights_used": weights,
         "price_shifts": shifts,
+        "regime": regime,
         "note": "建議單適用於 generated_on 之後的下一個交易日",
         "picks": picks,
     }
+    for m in market.values():
+        m.pop("closes20", None)   # sparkline 序列只留在 picks（8檔），全市場輸出剔除以控制檔案大小
     market_doc = {
         "date": latest_date,
         "updated_at": datetime.now(TAIPEI).isoformat(timespec="seconds"),
         "count": len(market),
+        "breadth": regime,
         "strategies": [{"id": s["id"], "name": s["name"], "desc": s["desc"],
                         "candidate": s.get("candidate", False)} for s in STRATEGIES],
         "stocks": sorted(market.values(), key=lambda m: -m["val"]),
@@ -128,7 +144,8 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         latest_date, market = build_market(upto)
         weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
         shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
-        picks = screen(market, cfg, weights, shifts)
+        regime = regime_state(upto, cfg)       # 環境閘門同樣只看歷史（walk-forward 誠實）
+        picks = [] if (regime["enabled"] and not regime["bull"]) else screen(market, cfg, weights, shifts)
         picks_doc = {"generated_on": latest_date, "picks": picks}
         trade_date = snaps[i]["date"]
         bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff

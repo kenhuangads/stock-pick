@@ -124,6 +124,10 @@ def passes_base_filters(m, cfg):
     f = cfg["base_filters"]
     if not (f["price_min"] <= m["close"] <= f["price_max"]):
         return False
+    if m["chg_pct"] < f.get("min_chg_pct", -100):
+        # 動能下限：70 日實證顯示訊號日漲幅 <5% 的建議單平均為負期望值
+        # （美股 stocks-in-play 理論同理：當沖標的需有事件級動能）
+        return False
     if m["val_ma5"] < f["min_value_5d_avg"]:
         return False
     if m["vol_ma5_lots"] < f["min_volume_5d_avg_lots"]:
@@ -189,6 +193,7 @@ def make_pick(m, score, hits, discount, price_shifts=None):
         "breakeven_ticks": breakeven_ticks(entry, discount),
         "amp_avg": m["amp_avg"], "vol_lots": m["vol_lots"],
         "dt_ratio": m["dt_ratio"],
+        "spark": m.get("closes20"),   # 近20日收盤走勢（卡片 sparkline）
     }
 
 

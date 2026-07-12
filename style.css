@@ -214,3 +214,17 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
   .tab .t-ico { font-size: 16px; }
   body { padding-bottom: 30px; }
 }
+
+/* ---- sparkline（近20日走勢，嵌在收盤價行右側）---- */
+.px { display: flex; align-items: center; gap: 8px; }
+.spark { width: 96px; height: 30px; margin-left: auto; opacity: .9; flex: 0 0 auto; }
+
+/* ---- 出場原因分佈條 ---- */
+.dist-card { margin: 10px 0 12px; }
+.dist-title { margin-bottom: 5px; }
+.dist-bar { display: flex; height: 14px; border-radius: 99px; overflow: hidden; gap: 2px; }
+.dist-bar i { display: block; min-width: 8px; }
+.dist-bar i.gain, .dist-legend i.gain { background: var(--up); }
+.dist-bar i.loss, .dist-legend i.loss { background: var(--down); }
+.dist-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; color: var(--muted); }
+.dist-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }

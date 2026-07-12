@@ -88,6 +88,7 @@
   <section class="panel" id="panel-review">
     <div class="stat-row" id="reviewStats"></div>
     <div class="chart-card"><canvas id="pnlChart"></canvas></div>
+    <div id="exitDist" class="dist-card"></div>
     <div class="notice small" id="riskNote"></div>
     <div id="riskSensitivity"></div>
     <div class="notice small">模擬規則：隔日以建議價掛限價買單，<b>以 5 分K逐根核實進出場順序</b>——第一根觸及掛價的 K 棒成交，
@@ -115,7 +116,7 @@
 </main>
 
 <footer class="foot">
-  <div>資料來源：臺灣證券交易所、證券櫃檯買賣中心公開 API · 每個交易日 21:00（台北）自動更新</div>
+  <div>資料來源：臺灣證券交易所、證券櫃檯買賣中心公開 API · 每個交易日收盤後自動更新（21:10 起多次排程兜底）</div>
   <div class="warn">⚠️ 本工具為程式化研究與教育用途，所有數據與模擬結果僅供參考，非投資建議。當沖交易風險極高，請自行評估並承擔交易風險。</div>
 </footer>
 

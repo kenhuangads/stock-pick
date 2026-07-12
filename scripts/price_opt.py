@@ -28,13 +28,13 @@
 4. 所有切換寫入 log，前端「每日復盤」頁完整呈現診斷與軌跡。
 """
 from indicators import round_tick, tick_size
-from review import trade_fees, simulate_trade, bars_match_ohlc
+from review import trade_fees, simulate_trade, bars_match_ohlc, limit_down_price
 from intraday import load_intraday
 
 ZERO = {"entry": 0.0, "target": 0.0, "stop": 0.0, "trail": 0.0, "tstop": None}
 
 
-def _sim_one(rec, shifts, fees_cfg, lots, bars=None):
+def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False):
     """用復盤紀錄裡的 cdp_base 與當日行情（5分K優先），以指定偏移＋出場模式重放一筆模擬。
     回傳 (filled, net, exit_reason)。走 review.simulate_trade 共用核心，口徑一致。"""
     base = rec["cdp_base"]
@@ -50,7 +50,8 @@ def _sim_one(rec, shifts, fees_cfg, lots, bars=None):
 
     ohlc = {"o": rec["day_open"], "h": rec["day_high"], "l": rec["day_low"], "c": rec["day_close"]}
     filled, fill, exit_price, reason, _ = simulate_trade(
-        entry, target, stop, ohlc, bars, trail_dist, tstop_bar)
+        entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
+        strict_fill=strict_fill, limit_dn=limit_down_price(rec.get("prev_close")))
     if not filled:
         # 未成交；若收盤高於掛價代表「掛太低錯過行情」
         return False, 0, ("runaway" if ohlc["c"] > entry else "nofill")
@@ -59,12 +60,12 @@ def _sim_one(rec, shifts, fees_cfg, lots, bars=None):
     return True, net, reason
 
 
-def _replay(records, shifts, fees_cfg, lots):
+def _replay(records, shifts, fees_cfg, lots, strict_fill=False):
     """整個窗口以指定偏移＋出場模式重放，回傳統計。records: [(rec, bars), ...]"""
     stat = {"n": len(records), "fills": 0, "net": 0, "wins": 0, "gw": 0, "gl": 0,
             "target": 0, "stop": 0, "close": 0, "trail": 0, "timeout": 0, "runaway": 0}
     for rec, bars in records:
-        filled, net, reason = _sim_one(rec, shifts, fees_cfg, lots, bars)
+        filled, net, reason = _sim_one(rec, shifts, fees_cfg, lots, bars, strict_fill)
         if filled:
             stat["fills"] += 1
             stat["net"] += net
@@ -117,9 +118,10 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
                 b = None  # 資料品質防線：與官方日K不符的 5分K 不得參與重放
             records.append((r, b))
     fees_cfg, lots = cfg["fees"], cfg["simulation"]["lots_per_trade"]
+    strict = cfg.get("simulation", {}).get("strict_fill", False)
 
-    base = _replay(records, ZERO, fees_cfg, lots)
-    cur = _replay(records, current, fees_cfg, lots)
+    base = _replay(records, ZERO, fees_cfg, lots, strict)
+    cur = _replay(records, current, fees_cfg, lots, strict)
     target_fr = pcfg.get("target_fill_rate", 0)
 
     def fill_rate(st):
@@ -136,17 +138,18 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
     if base["fills"] >= pcfg["min_trades"]:
         grid_entry = pcfg.get("entry_grid") or pcfg.get("shift_grid", [])
         grid_exit = pcfg.get("exit_grid") or pcfg.get("shift_grid", [])
+        grid_stop = pcfg.get("stop_grid") or grid_exit   # 停損可用獨立網格（支援更緊的停損）
         grid_trail = pcfg.get("trail_grid", [0])
         grid_tstop = pcfg.get("tstop_grid", [None])
         min_payoff = pcfg.get("min_payoff", 1.2)
         scored = []
         for a in grid_entry:
             for b in grid_exit:
-                for c in grid_exit:
+                for c in grid_stop:
                     for t in grid_trail:
                         for ts in grid_tstop:
                             sh = {"entry": a, "target": b, "stop": c, "trail": t, "tstop": ts}
-                            st = _replay(records, sh, fees_cfg, lots)
+                            st = _replay(records, sh, fees_cfg, lots, strict)
                             # 同分時偏好較小偏移與較簡單的出場模式（防過擬合傾向）
                             dist0 = abs(a) + abs(b) + abs(c) + (0.01 if t else 0) + (0.01 if ts is not None else 0)
                             scored.append((sh, st, dist0))

@@ -90,6 +90,16 @@ function riskBadgeHtml(p) {
     return `<div class="risk-line warn">⚠️ 建議 ${lots} 張・最壞 −${fmt(worst)}（吃掉大半日限額度）</div>`;
   return `<div class="risk-line ok">🛡️ 建議 ${lots} 張・最壞 −${fmt(worst)}</div>`;
 }
+function sparkline(closes, w = 96, h = 30) {
+  if (!closes || closes.length < 2) return "";
+  const min = Math.min(...closes), max = Math.max(...closes), rng = max - min || 1;
+  const pts = closes.map((c, i) =>
+    `${(i / (closes.length - 1) * w).toFixed(1)},${(h - 2 - (c - min) / rng * (h - 4)).toFixed(1)}`).join(" ");
+  const up = closes[closes.length - 1] >= closes[0];
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"
+    title="近 ${closes.length} 日收盤走勢"><polyline points="${pts}" fill="none"
+    stroke="${up ? "var(--up)" : "var(--down)"}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+}
 function stockCard(p, rank) {
   const tags = (p.strategies || [])
     .map((id) => `<span class="tag" title="${stratMeta[id]?.desc || ""}">${stratMeta[id]?.name || id}</span>`)
@@ -104,7 +114,7 @@ function stockCard(p, rank) {
       <span class="score" title="綜合分數（策略權重加總）">${p.score}</span>
     </div>
     <div class="px">收盤 <b>${fmt2(p.close)}</b>
-      <span class="${signCls(chg)}">${signTxt(chg)}${fmt2(chg)}%</span></div>
+      <span class="${signCls(chg)}">${signTxt(chg)}${fmt2(chg)}%</span>${sparkline(p.spark)}</div>
     <div class="tags">${tags || '<span class="muted small">未觸發計分策略</span>'}</div>
     <div class="price-grid">
       <div><div class="lb">建議買進 NL</div><div class="v buy">${fmt2(p.entry ?? p.cdp?.nl)}</div></div>
@@ -143,13 +153,20 @@ function renderPicks() {
     riskSummary = `<br>🛡️ 依建議張數全下、全部觸停損的最壞合計約 <b>−${fmt(worstSum)}</b>；你的日限 <b>−${fmt(rk.daily_loss_limit)}</b>——盤中實際請依風險閘門順序進場（超額即停，卡片有逐檔標註）。`;
   }
   const nFb = (d.picks || []).filter((p) => p.fallback).length;
+  // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方
+  const rg = d.regime || DB.market?.breadth || null;
+  const regimeChip = rg && rg.breadth_ma != null
+    ? `<span class="badge ${rg.bull ? "on" : "off"}" title="市場寬度＝全市場上漲家數比的 5 日均；<0.5 為跌多漲少的空方環境（實證該環境隔日當沖平均為負）">${rg.bull ? "🌤 多方環境" : "⛈ 空方環境"}｜寬度5MA ${(rg.breadth_ma * 100).toFixed(0)}%</span> ` : "";
+  const gatedOut = rg && rg.enabled && !rg.bull && !n;
   $("#picksInfo").innerHTML = n
-    ? `📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
+    ? `${regimeChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
         ? `（完整門檻 ${n - nFb} 檔＋<b>遞補 ${nFb} 檔</b>——弱勢窗口活躍策略較少，遞補標的訊號較弱、信心自酌）` : ""}
        <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。${shifted || exitMode
         ? `<br>📐 建議價已套用價格模型（進場 ${shiftTxt(sh.entry ?? 0)}、停利 ${shiftTxt(sh.target ?? 0)}、停損 ${shiftTxt(sh.stop ?? 0)}${exitMode}，依復盤自動迭代）。`
         : ""}${riskSummary}`
-    : `本日基礎濾網後沒有符合門檻的標的（或歷史資料尚在累積）。可到「自訂選股」放寬條件。`;
+    : gatedOut
+      ? `${regimeChip}🛑 <b>${d.generated_on}</b> 收盤後判定為<b>空方環境</b>（市場寬度 5 日均 ${(rg.breadth_ma * 100).toFixed(0)}% < 50%），依環境濾網<b>今日不出建議單</b>——實證顯示此環境下隔日當沖平均為負期望值，空手也是一種部位。可到「自訂選股」自行研究。`
+      : `本日基礎濾網後沒有符合門檻的標的（或歷史資料尚在累積）。可到「自訂選股」放寬條件。`;
   $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
 
@@ -361,13 +378,21 @@ function renderReview() {
 
   // 大賺小賠儀表板：以風控後實際進場的每筆淨損益計
   const mNets = [];
-  daily.forEach((d) => d.rows.forEach((p) => { if (p._m?.taken) mNets.push(p._m.net); }));
+  const reasonAgg = {};   // 出場原因分佈（風控後實際進場的單）
+  daily.forEach((d) => d.rows.forEach((p) => {
+    if (!p._m?.taken) return;
+    mNets.push(p._m.net);
+    const r = reasonAgg[p.exit_reason] || (reasonAgg[p.exit_reason] = { n: 0, net: 0 });
+    r.n++; r.net += p._m.net;
+  }));
   const mW = mNets.filter((x) => x > 0), mL = mNets.filter((x) => x <= 0);
   const avgW = mW.length ? mW.reduce((a, b) => a + b, 0) / mW.length : null;
   const avgL = mL.length ? -mL.reduce((a, b) => a + b, 0) / mL.length : null;
   const payoff = avgW != null && avgL ? avgW / avgL : null;
   const pf = mL.length ? mW.reduce((a, b) => a + b, 0) / -mL.reduce((a, b) => a + b, 0) : null;
   const expectPer = mNets.length ? Math.round(mNets.reduce((a, b) => a + b, 0) / mNets.length) : null;
+  let ddPeak = 0, mdd = 0;   // 最大回撤（風控後累計曲線）
+  cumManaged.forEach((c) => { ddPeak = Math.max(ddPeak, c); mdd = Math.min(mdd, c - ddPeak); });
 
   $("#reviewStats").innerHTML = `
     <div class="stat"><div class="lb">累計淨損益<span class="muted">（風控後）</span></div><div class="v ${signCls(totNet)}">${signTxt(totNet)}${fmt(totNet)}</div></div>
@@ -375,9 +400,20 @@ function renderReview() {
     <div class="stat"><div class="lb">賺賠比<span class="muted">（均賺/均賠）</span></div><div class="v ${payoff != null ? (payoff >= 1.2 ? "up" : payoff < 1 ? "down" : "") : ""}">${payoff != null ? payoff.toFixed(2) : "–"}</div></div>
     <div class="stat"><div class="lb">獲利因子<span class="muted">（總賺/總賠）</span></div><div class="v ${pf != null ? (pf >= 1 ? "up" : "down") : ""}">${pf != null ? pf.toFixed(2) : "–"}</div></div>
     <div class="stat"><div class="lb">每筆期望值</div><div class="v ${signCls(expectPer)}">${expectPer != null ? signTxt(expectPer) + fmt(expectPer) : "–"}</div></div>
+    <div class="stat"><div class="lb">最大回撤<span class="muted">（風控後）</span></div><div class="v ${mdd < 0 ? "down" : ""}">${fmt(mdd)}</div></div>
     <div class="stat"><div class="lb">最慘單日<span class="muted">（風控後）</span></div><div class="v ${signCls(worstM)}">${signTxt(worstM)}${fmt(worstM)}</div></div>
     <div class="stat"><div class="lb">觸發斷路器</div><div class="v">${haltDays} 天</div></div>
+    <div class="stat"><div class="lb">5分K核實</div><div class="v">${(() => { const a = daily.reduce((s, d) => s + (d.raw.summary?.n_intraday || 0), 0), b = daily.reduce((s, d) => s + d.raw.summary.n_picks, 0); return b ? Math.round(a / b * 100) + "%" : "–"; })()}</div></div>
     <div class="stat"><div class="lb">復盤天數</div><div class="v">${daily.length}</div></div>`;
+
+  // 出場原因分佈條：寬度=筆數占比、顏色=該原因總損益方向（一眼看出錢從哪賺、往哪虧）
+  const reasonLabel = { target: "停利", trail: "移動停利", stop: "停損", timeout: "時間停損", close: "收盤沖銷" };
+  const totalTakenN = Object.values(reasonAgg).reduce((s, r) => s + r.n, 0);
+  $("#exitDist").innerHTML = totalTakenN ? `<div class="dist-title muted small">出場原因分佈（風控後 ${totalTakenN} 筆・寬度=筆數占比・紅=該類合計為賺、綠=賠）</div>
+    <div class="dist-bar">${Object.entries(reasonAgg).sort((a, b) => b[1].n - a[1].n).map(([k, r]) =>
+      `<i class="${r.net >= 0 ? "gain" : "loss"}" style="flex:${r.n}" title="${reasonLabel[k] || k}：${r.n} 筆、合計 ${signTxt(r.net)}${fmt(r.net)}"></i>`).join("")}</div>
+    <div class="dist-legend small">${Object.entries(reasonAgg).sort((a, b) => b[1].n - a[1].n).map(([k, r]) =>
+      `<span><i class="${r.net >= 0 ? "gain" : "loss"}"></i>${reasonLabel[k] || k} ${Math.round(r.n / totalTakenN * 100)}%・${signTxt(r.net)}${fmt(r.net)}</span>`).join("")}</div>` : "";
 
   $("#riskNote").innerHTML = rk.enabled
     ? `🛡️ 已套用每日虧損風控：部位<b>${rk.position_sizing === "risk_parity" ? `風險預算 ${fmt(rk.per_trade_risk)} 元/筆` : `固定 ${rk.lots} 張`}</b>、
