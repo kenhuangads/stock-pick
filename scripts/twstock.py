@@ -221,17 +221,18 @@ def fetch_twse_daytrade_stats(iso_date):
 
 
 def fetch_twse_daytrade_eligible():
-    """上市可現股當沖名單。回傳 (eligible_codes, suspended_codes)。"""
+    """上市可現股當沖名單。回傳 (eligible_codes, sell_first_suspended_codes)。
+    在清單即（至少）可先買後賣做多；Suspension 有值＝暫停先賣後買＝不可做空。
+    （語意對齊 TPEx 版：eligible 含全部清單，sus 僅標記不可做空者。）"""
     data = safe_get_json("https://openapi.twse.com.tw/v1/exchangeReport/TWTB4U")
     ok, sus = set(), set()
     for r in data or []:
         code = r.get("Code", "").strip()
         if not code:
             continue
+        ok.add(code)                              # 在清單＝可現股當沖（至少做多）
         if str(r.get("Suspension", "")).strip():
-            sus.add(code)
-        else:
-            ok.add(code)
+            sus.add(code)                         # 暫停先賣後買＝只能先買後賣、不可放空
     return ok, sus
 
 

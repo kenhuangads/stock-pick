@@ -209,6 +209,9 @@ def passes_base_filters(m, cfg, side="long"):
         return False
     if f.get("require_daytrade_eligible", True) and m["flags"]["dt_ok"] is False:
         return False
+    if side == "short" and m["flags"].get("dt_sell_first_suspended"):
+        # 做空＝現股當沖先賣後買；暫停先賣後買的股票只能先買後賣（做多），不可放空
+        return False
     return True
 
 
