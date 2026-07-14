@@ -39,6 +39,11 @@ def limit_down_price(prev_close):
     return round_tick(prev_close * 0.9, "up") if prev_close else None
 
 
+def limit_up_price(prev_close):
+    """台股當日漲停價 ≈ 前收 × 1.1（做空停損/回補的尾部風險：漲停鎖死時買不到更便宜）。"""
+    return round_tick(prev_close * 1.1, "down") if prev_close else None
+
+
 def trade_fees(buy_price, sell_price, lots, fees_cfg, discount=None):
     shares = lots * 1000
     disc = discount if discount is not None else fees_cfg["default_discount"]
@@ -61,17 +66,86 @@ def bars_match_ohlc(bars, ohlc, tol=0.005, min_bars=40):
     return True
 
 
+def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
+                    strict_fill=False, limit_up=None):
+    """做空模擬（做多邏輯的鏡像）：放空掛 entry（高、逆勢賣出區），
+    回補停利 target（低）、停損 stop（高）。價格上漲＝虧損方向。
+    移動停利：觸及回補價後追蹤「谷底＋trail」，讓下跌的尾巴多跑；原回補價為天花板。"""
+    def stop_px(px, bh):
+        # 停損回補價修正：觸及漲停的根，市價買回最差以漲停價成交（不可能更便宜）
+        if limit_up is not None and bh >= limit_up:
+            return max(px, limit_up) if px is not None else limit_up
+        return px
+
+    if bars:
+        fill = None
+        armed, trough = False, None   # 觸及回補價後啟動移動停利追蹤
+        for i, (bo, bh, bl, bc) in enumerate(bars):
+            if fill is None:
+                if bo >= entry:
+                    fill = bo               # 開盤即高於掛賣價 → 以開盤價成交（更好的放空價）
+                elif (bh > entry) if strict_fill else (bh >= entry):
+                    fill = entry            # 盤中漲（穿）觸掛賣價成交
+                else:
+                    continue
+                if fill >= stop:
+                    return True, fill, stop_px(fill, bh), "stop", "intraday"  # 跳空穿越停損
+                if bh >= stop:
+                    return True, fill, stop_px(stop, bh), "stop", "intraday"
+                continue
+            if not armed:
+                if bh >= stop:
+                    return True, fill, stop_px(max(stop, bo), bh), "stop", "intraday"
+                if bl <= target:
+                    if trail_dist:
+                        armed, trough = True, bl
+                        level = min(target, trough + trail_dist)
+                        if bc > level:
+                            return True, fill, level, "trail", "intraday"
+                    else:
+                        return True, fill, target, "target", "intraday"
+                elif tstop_bar is not None and i >= tstop_bar:
+                    return True, fill, bc, "timeout", "intraday"
+            else:
+                level = min(target, trough + trail_dist)   # 原回補價為天花板
+                if bo >= level:
+                    return True, fill, bo, "trail", "intraday"   # 跳空：以開盤價成交
+                if bh >= level:
+                    return True, fill, level, "trail", "intraday"
+                trough = min(trough, bl)
+        if fill is None:
+            return False, None, None, "nofill", "intraday"
+        return True, fill, ohlc["c"], "close", "intraday"
+
+    # fallback：日K保守規則
+    if ohlc["o"] >= entry:
+        fill = ohlc["o"]
+    elif (ohlc["h"] > entry) if strict_fill else (ohlc["h"] >= entry):
+        fill = entry
+    else:
+        return False, None, None, "nofill", "daily"
+    if fill >= stop:
+        return True, fill, stop_px(fill, ohlc["h"]), "stop", "daily"
+    if ohlc["h"] >= stop:
+        return True, fill, stop_px(stop, ohlc["h"]), "stop", "daily"
+    if ohlc["l"] <= target:
+        return True, fill, target, "target", "daily"
+    return True, fill, ohlc["c"], "close", "daily"
+
+
 def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
-                   strict_fill=False, limit_dn=None):
+                   strict_fill=False, limit_dn=None, side="long", limit_up=None):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
+    side="short" 走完全鏡像的做空邏輯（放空掛高、回補在低、停損在高、漲停穿越修正）。
     ohlc: {o,h,l,c} 日K；bars: [[o,h,l,c],...] 5分K（可 None）。
     trail_dist: 地板式移動停利距離（絕對價差，None/0=關）；tstop_bar: 時間停損 bar index（None=關）。
-    strict_fill: 穿價成交——限價買單需「跌破掛價」（bar 低 < 掛價）或開盤已低於掛價才算成交；
-      恰好觸價（低==掛價）視為排隊買不到（真實市場的排隊風險，回測慣例的保守假設）。
-    limit_dn: 當日跌停價——停損觸發根若已觸及跌停，市價停損單最差以跌停價成交
-      （跌停鎖死時掛單堆積、成交價不可能優於跌停，修正尾部風險低估）。
+    strict_fill: 穿價成交——限價買單需「跌破掛價」（做空為「漲穿掛賣價」）才算成交；恰好觸價視為排隊成交不到。
+    limit_dn/limit_up: 當日跌停/漲停價——停損觸發根若已觸及，市價單最差以停板價成交（修正尾部風險低估）。
     出場理由：target 停利｜trail 移動停利｜stop 停損｜timeout 時間停損｜close 收盤沖銷｜nofill 未成交。"""
+    if side == "short":
+        return _simulate_short(entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
+                               strict_fill, limit_up)
     def stop_px(px, bl):
         # 停損出場價修正：觸及跌停的根，最差以跌停價成交
         if limit_dn is not None and bl <= limit_dn:
@@ -138,12 +212,13 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
 
 def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
     """回傳含成交/出場/損益的復盤紀錄。ohlc: 交易日的 {o,h,l,c}；bars: 當日 5 分K。"""
+    side = pick.get("side", "long")
     r = {
-        "code": pick["code"], "name": pick["name"], "market": pick.get("market"),
+        "code": pick["code"], "name": pick["name"], "market": pick.get("market"), "side": side,
         "score": pick["score"], "strategies": pick["strategies"],
         "entry": pick["entry"], "target": pick["target"], "stop": pick["stop"],
         "trail_dist": pick.get("trail_dist"), "tstop_bar": pick.get("tstop_bar"),
-        "prev_close": pick.get("close"),   # 訊號日收盤＝交易日的「前收」，供跌停價/重放使用
+        "prev_close": pick.get("close"),   # 訊號日收盤＝交易日的「前收」，供停板價/重放使用
         "cdp_base": pick.get("cdp_base"),  # 原始 CDP 價位與當日振幅，供價格模型重放迭代
         "day_open": ohlc["o"], "day_high": ohlc["h"], "day_low": ohlc["l"], "day_close": ohlc["c"],
         "filled": False, "fill_price": None, "exit_price": None, "exit_reason": None,
@@ -157,19 +232,26 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         pick["entry"], pick["target"], pick["stop"], ohlc, bars,
         pick.get("trail_dist"), pick.get("tstop_bar"),
         strict_fill=sim_cfg.get("strict_fill", False),
-        limit_dn=limit_down_price(pick.get("close")))
+        limit_dn=limit_down_price(pick.get("close")),
+        side=side, limit_up=limit_up_price(pick.get("close")))
     r["sim_mode"], r["exit_reason"] = mode, reason
     if not filled:
         return r
     r["filled"], r["fill_price"], r["exit_price"] = True, fill, exit_price
 
     shares = lots * 1000
-    fee_b, fee_s, tax = trade_fees(fill, exit_price, lots, fees_cfg)
-    gross = int((exit_price - fill) * shares)
+    if side == "short":
+        # 做空：先賣（fill）後買（exit）。毛利 =（賣−買）；證交稅課在賣出＝fill 那腿
+        fee_b, fee_s, tax = trade_fees(exit_price, fill, lots, fees_cfg)
+        gross = int((fill - exit_price) * shares)
+        r["ret_pct"] = round((fill - exit_price) / fill * 100, 2)
+    else:
+        fee_b, fee_s, tax = trade_fees(fill, exit_price, lots, fees_cfg)
+        gross = int((exit_price - fill) * shares)
+        r["ret_pct"] = round((exit_price - fill) / fill * 100, 2)
     r["gross"] = gross
     r["fees"] = fee_b + fee_s + tax
     r["net"] = gross - r["fees"]
-    r["ret_pct"] = round((exit_price - fill) / fill * 100, 2)
     return r
 
 

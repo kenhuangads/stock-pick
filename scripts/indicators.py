@@ -62,9 +62,11 @@ def compute_stock_metrics(series):
     rng = today["h"] - today["l"]
     body_ratio = (today["c"] - today["o"]) / rng if rng else 0.0   # 紅K實體佔振幅比（負=收黑）
     close_pos = (today["c"] - today["l"]) / rng if rng else 0.0    # 收盤位於當日區間位置（1=收最高）
-    var20 = sum((c - ma20) ** 2 for c in closes[-20:]) / 20
-    boll_up = ma20 + 2 * (var20 ** 0.5)
+    sd20 = (sum((c - ma20) ** 2 for c in closes[-20:]) / 20) ** 0.5
+    boll_up = ma20 + 2 * sd20
+    boll_dn = ma20 - 2 * sd20                                   # 布林下軌（做空用）
     up3 = len(closes) >= 4 and closes[-1] > closes[-2] > closes[-3] > closes[-4]
+    down3 = len(closes) >= 4 and closes[-1] < closes[-2] < closes[-3] < closes[-4]
     vol_nofade = len(vols) >= 2 and vols[-1] >= vols[-2]
 
     amp_win = series[-30:] if len(series) >= 30 else series[-20:]
@@ -72,6 +74,7 @@ def compute_stock_metrics(series):
     amp_avg = sum(amps) / len(amps) if amps else 0.0
 
     high20 = max(k["h"] for k in series[-21:-1])   # 不含今日的前 20 日最高
+    low20 = min(k["l"] for k in series[-21:-1])    # 不含今日的前 20 日最低（做空用）
 
     dt_ratio = None
     dt_hist = [(k.get("dt") or 0) / k["v"] * 100 for k in series[-6:] if k.get("dt") and k["v"]]
@@ -102,10 +105,11 @@ def compute_stock_metrics(series):
         "amp_today": round((today["h"] - today["l"]) / today["o"] * 100, 2) if today["o"] else 0,
         "amp_avg": round(amp_avg, 2),
         "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2),
-        "high20": high20,
-        "prev_high": prev["h"], "prev_close": prev["c"],
+        "high20": high20, "low20": low20,
+        "prev_high": prev["h"], "prev_low": prev["l"], "prev_close": prev["c"],
         "body_ratio": round(body_ratio, 2), "close_pos": round(close_pos, 2),
-        "boll_up": round(boll_up, 2), "up3": up3, "vol_nofade": vol_nofade,
+        "boll_up": round(boll_up, 2), "boll_dn": round(boll_dn, 2),
+        "up3": up3, "down3": down3, "vol_nofade": vol_nofade,
         "dt_ratio": round(dt_ratio, 1) if dt_ratio is not None else None,
         "dt_ratio_ma5": round(dt_ratio_ma5, 1) if dt_ratio_ma5 is not None else None,
         "turnover": round(turnover, 2) if turnover is not None else None,

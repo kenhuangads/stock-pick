@@ -113,20 +113,89 @@ STRATEGIES = [
         "fn": lambda m: (m.get("breakeven") or 99) <= 2,
         "candidate": True,
     },
+    # ========== 做空側策略（side=short）：空方環境（大盤寬度弱）時啟用 ==========
+    # 與做多鏡像：找「弱勢、破位、出貨」的標的隔日放空（現股當沖先賣後買 / 資券當沖）
+    {
+        "id": "s_vol_dump",
+        "name": "爆量收黑",
+        "desc": "今日量 ≥ 前5日均量1.5倍且收黑，量大不漲＝出貨，隔日續弱機率高",
+        "fn": lambda m: (m["vol_ratio"] or 0) >= 1.5 and m["close"] < m["open"],
+        "side": "short",
+    },
+    {
+        "id": "s_ma_bear",
+        "name": "均線空頭",
+        "desc": "5MA < 10MA < 20MA 且收盤破5MA，順大勢做空的結構基礎",
+        "fn": lambda m: m["ma5"] < m["ma10"] < m["ma20"] and m["close"] < m["ma5"],
+        "side": "short",
+    },
+    {
+        "id": "s_breakdown20",
+        "name": "跌破20日低",
+        "desc": "收盤跌破前20日最低價，動能破底型態、易引發停損追殺",
+        "fn": lambda m: m["close"] < m["low20"],
+        "side": "short",
+    },
+    {
+        "id": "s_high_amp",
+        "name": "高波動體質",
+        "desc": "近30日平均振幅 ≥ 3.5%，做空同樣需要足夠價差空間",
+        "fn": lambda m: m["amp_avg"] >= 3.5,
+        "side": "short",
+    },
+    {
+        "id": "s_weak_close",
+        "name": "長黑弱勢",
+        "desc": "跌幅 ≥ 2%、黑K實體佔振幅 ≥ 60% 且收在當日區間底部 20%，尾盤賣壓沉重、隔日慣性偏空",
+        "fn": lambda m: m["chg_pct"] <= -2 and m["body_ratio"] <= -0.6 and m["close_pos"] <= 0.2,
+        "side": "short",
+    },
+    {
+        "id": "s_gap_down",
+        "name": "跳空破低不補",
+        "desc": "開盤跳空跌破前日最低、全日最高未補缺口且收黑，空方力道明確",
+        "fn": lambda m: m["open"] < m["prev_low"] and m["high"] < m["prev_close"] and m["close"] < m["open"],
+        "side": "short",
+        "candidate": True,
+    },
+    {
+        "id": "s_boll_break",
+        "name": "布林下軌破",
+        "desc": "收盤跌破布林通道下軌（20MA−2σ），統計意義上的波動擴張破位",
+        "fn": lambda m: m.get("boll_dn") is not None and m["close"] < m["boll_dn"],
+        "side": "short",
+        "candidate": True,
+    },
+    {
+        "id": "s_inst_sell",
+        "name": "法人賣超",
+        "desc": "三大法人合計淨賣超 ≥ 500 張且今日收黑，法人調節、隔日慣性偏空（籌碼面）",
+        "fn": lambda m: (m.get("inst_net") or 0) <= -500 and m["close"] < m["open"],
+        "side": "short",
+        "candidate": True,
+    },
 ]
+
+for _s in STRATEGIES:
+    _s.setdefault("side", "long")   # 未標註者預設為做多策略
 
 STRAT_BY_ID = {s["id"]: s for s in STRATEGIES}
 DEFAULT_WEIGHT = 1.0
 
 
-def passes_base_filters(m, cfg):
-    """基礎濾網：流動性、價格帶、波動下限、排除處置/注意/非當沖標的。"""
+def passes_base_filters(m, cfg, side="long"):
+    """基礎濾網：流動性、價格帶、波動下限、排除處置/注意/非當沖標的。
+    動能下限依方向：做多要求漲幅 ≥ min_chg_pct，做空要求跌幅 ≥ min_chg_pct（收黑夠深）。"""
     f = cfg["base_filters"]
     if not (f["price_min"] <= m["close"] <= f["price_max"]):
         return False
-    if m["chg_pct"] < f.get("min_chg_pct", -100):
-        # 動能下限：70 日實證顯示訊號日漲幅 <5% 的建議單平均為負期望值
-        # （美股 stocks-in-play 理論同理：當沖標的需有事件級動能）
+    # 動能下限：70 日實證顯示訊號日動能不足（漲幅<5%）的建議單平均為負期望值
+    # （美股 stocks-in-play 理論同理：當沖標的需有事件級動能）。做空鏡像＝需夠深的跌幅。
+    mom = f.get("min_chg_pct", -100)
+    if side == "short":
+        if -m["chg_pct"] < mom:
+            return False
+    elif m["chg_pct"] < mom:
         return False
     if m["val_ma5"] < f["min_value_5d_avg"]:
         return False
@@ -148,11 +217,13 @@ def default_weight(s):
     return 0.0 if s.get("candidate") else DEFAULT_WEIGHT
 
 
-def evaluate(m, weights):
-    """回傳 (score, [觸發的策略id])。所有觸發（含權重0的候選/停用策略）都記錄
-    供復盤追蹤，但只有權重 > 0 的策略貢獻分數。"""
+def evaluate(m, weights, side="long"):
+    """回傳 (score, [觸發的策略id])，只評估指定方向（long/short）的策略。
+    所有觸發（含權重0的候選/停用策略）都記錄供復盤追蹤，但只有權重 > 0 的策略貢獻分數。"""
     hits, score = [], 0.0
     for s in STRATEGIES:
+        if s.get("side", "long") != side:
+            continue
         try:
             if s["fn"](m):
                 hits.append(s["id"])
@@ -174,22 +245,37 @@ def shifted_prices(c, day_range, shifts):
     return entry, target, stop
 
 
-def make_pick(m, score, hits, discount, price_shifts=None):
-    """由 CDP＋價格模型偏移產生隔日建議買賣價（NL 掛買、NH 停利、AL 停損）。
-    同時記錄出場引擎參數（移動停利距離/時間停損，由價格模型 A/B 實證決定開關）
-    與 cdp_base（原始價位與當日振幅）供價格迭代重放歷史使用。"""
+def short_prices(c, day_range):
+    """做空建議價（CDP 對稱）：放空掛 NH（逆勢賣出區）、回補停利 NL、停損 AH（順勢突破＝看錯）。
+    做空 v1 用原始 CDP 價（價格模型目前只優化做多側，避免把多方最佳偏移錯套到空方）。
+    保證 停損 > 進場 > 停利。"""
+    entry = round_tick(c["nh"], "up")
+    target = round_tick(c["nl"], "down")
+    stop = round_tick(c["ah"], "up")
+    stop = max(stop, round_tick(entry + tick_size(entry), "up"))     # 停損必須高於進場
+    target = min(target, round_tick(entry - tick_size(entry), "down"))  # 停利必須低於進場
+    return entry, target, stop
+
+
+def make_pick(m, score, hits, discount, price_shifts=None, side="long"):
+    """由 CDP＋價格模型偏移產生隔日建議買賣價。
+    做多：NL 掛買、NH 停利、AL 停損（＋價格模型偏移）；做空：NH 放空、NL 回補、AH 停損。
+    出場引擎（移動停利/時間停損）兩側共用（R 為單位、方向無關）。"""
     c = m["cdp"]
     day_range = m["high"] - m["low"]
-    entry, target, stop = shifted_prices(c, day_range, price_shifts)
+    if side == "short":
+        entry, target, stop = short_prices(c, day_range)
+    else:
+        entry, target, stop = shifted_prices(c, day_range, price_shifts)
     trail_mult = (price_shifts or {}).get("trail") or 0
     return {
-        "code": m["code"], "name": m["name"], "market": m["market"],
+        "code": m["code"], "name": m["name"], "market": m["market"], "side": side,
         "close": m["close"], "chg_pct": m["chg_pct"],
         "score": score, "strategies": hits,
         "entry": entry, "target": target, "stop": stop, "ah": c["ah"],
         "trail_dist": round(trail_mult * day_range, 2) if trail_mult else None,
         "tstop_bar": (price_shifts or {}).get("tstop"),
-        "cdp_base": {"nl": c["nl"], "nh": c["nh"], "al": c["al"], "r": round(day_range, 2)},
+        "cdp_base": {"nl": c["nl"], "nh": c["nh"], "al": c["al"], "ah": c["ah"], "r": round(day_range, 2)},
         "breakeven_ticks": breakeven_ticks(entry, discount),
         "amp_avg": m["amp_avg"], "vol_lots": m["vol_lots"],
         "dt_ratio": m["dt_ratio"],
@@ -197,8 +283,8 @@ def make_pick(m, score, hits, discount, price_shifts=None):
     }
 
 
-def screen(market, cfg, weights, price_shifts=None):
-    """全市場掃描 → 依綜合分數排序的推薦清單。
+def screen(market, cfg, weights, price_shifts=None, side="long"):
+    """全市場掃描 → 依綜合分數排序的推薦清單（指定方向 long/short）。
     門檻只計「有權重的策略」命中數，候選/停用策略純追蹤、不影響入選。
 
     遞補機制：弱勢窗口下活躍策略減少、完整門檻可能選不滿 max_picks——
@@ -210,13 +296,13 @@ def screen(market, cfg, weights, price_shifts=None):
     min_trig = cfg.get("min_strategies_triggered", 2)
     max_picks = cfg.get("max_picks", 8)
     for m in market.values():
-        if not passes_base_filters(m, cfg):
+        if not passes_base_filters(m, cfg, side):
             continue
-        score, hits = evaluate(m, weights)
+        score, hits = evaluate(m, weights, side)
         if not hits:
             continue
         active_hits = [h for h in hits if weights.get(h, 0) > 0]
-        p = make_pick(m, score, hits, discount, price_shifts)
+        p = make_pick(m, score, hits, discount, price_shifts, side)
         if len(active_hits) >= min_trig and score > 0:
             picks.append(p)
         else:

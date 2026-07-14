@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from review import simulate_trade, bars_match_ohlc, limit_down_price
+from review import simulate_trade, bars_match_ohlc, limit_down_price, limit_up_price
 from intraday import load_intraday
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,10 +37,12 @@ def audit():
             if bars and not bars_match_ohlc(bars, ohlc):
                 bars = None
 
+            side = p.get("side", "long")
             filled, fill, exitp, reason, mode = simulate_trade(
                 p["entry"], p["target"], p["stop"], ohlc, bars,
                 p.get("trail_dist"), p.get("tstop_bar"),
-                strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")))
+                strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
+                side=side, limit_up=limit_up_price(p.get("prev_close")))
             if (filled, fill, exitp, reason, mode) != (
                     p["filled"], p["fill_price"], p["exit_price"], p["exit_reason"], p["sim_mode"]):
                 issues.append(f"{date} {p['code']} 重放不一致："
@@ -51,16 +53,24 @@ def audit():
                 continue
             n_intraday += 1
             def fillable(b):
-                # 與模擬引擎同口徑：開盤 ≤ 掛價必成；否則 strict 需穿價、寬鬆觸價即可
+                # 與模擬引擎同口徑；做空鏡像＝開盤 ≥ 掛賣價必成，否則需（穿）漲觸掛價
+                if side == "short":
+                    return b[0] >= p["entry"] or (b[1] > p["entry"] if strict else b[1] >= p["entry"])
                 return b[0] <= p["entry"] or (b[2] < p["entry"] if strict else b[2] <= p["entry"])
 
             if p["exit_reason"] in ("target", "trail"):
-                # 停利/移動停利：成交之後必須真的觸及過原停利價（移動停利以停利觸價啟動）
                 fill_i = next((i for i, b in enumerate(bars) if fillable(b)), None)
-                if fill_i is None or not any(b[1] >= p["target"] for b in bars[fill_i + 1:]):
+                # 做多：成交後須觸及過停利價（高 ≥ target）；做空：須觸及回補價（低 ≤ target）
+                touched = (any(b[2] <= p["target"] for b in bars[fill_i + 1:]) if side == "short"
+                           else any(b[1] >= p["target"] for b in bars[fill_i + 1:])) if fill_i is not None else False
+                if not touched:
                     issues.append(f"{date} {p['code']} 停利順序違規：成交後未曾觸及 {p['target']}")
-            if p["exit_reason"] == "stop" and p["fill_price"] > p["stop"] and p["exit_price"] > p["stop"]:
-                issues.append(f"{date} {p['code']} 停損出場價 {p['exit_price']} 高於停損價 {p['stop']}（未跳空卻優於停損）")
+            if p["exit_reason"] == "stop":
+                # 未跳空卻拿到「優於停損」的出場價＝bug（做多出場>停損；做空出場<停損）
+                if side == "short" and p["fill_price"] < p["stop"] and p["exit_price"] < p["stop"]:
+                    issues.append(f"{date} {p['code']} 做空停損回補價 {p['exit_price']} 低於停損價 {p['stop']}")
+                if side == "long" and p["fill_price"] > p["stop"] and p["exit_price"] > p["stop"]:
+                    issues.append(f"{date} {p['code']} 停損出場價 {p['exit_price']} 高於停損價 {p['stop']}（未跳空卻優於停損）")
             if not p["filled"] and any(fillable(b) for b in bars):
                 issues.append(f"{date} {p['code']} 未成交但 5分K 顯示曾觸價")
 

@@ -15,14 +15,18 @@ let settings = { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem("sp_set
 
 /* ---------- 費用模型（與後端 review.py 一致） ---------- */
 const FEE_RATE = 0.001425, DT_TAX = 0.0015;
-function tradeNet(fill, exit, lots) {
+function tradeNet(buy, sell, lots) {
   const sh = lots * 1000;
   const disc = settings.discount / 10;
-  const feeB = Math.max(Math.floor(fill * sh * FEE_RATE * disc), settings.minFee);
-  const feeS = Math.max(Math.floor(exit * sh * FEE_RATE * disc), settings.minFee);
-  const tax = Math.floor(exit * sh * DT_TAX);
-  const gross = Math.trunc((exit - fill) * sh);
+  const feeB = Math.max(Math.floor(buy * sh * FEE_RATE * disc), settings.minFee);
+  const feeS = Math.max(Math.floor(sell * sh * FEE_RATE * disc), settings.minFee);
+  const tax = Math.floor(sell * sh * DT_TAX);
+  const gross = Math.trunc((sell - buy) * sh);
   return { gross, fees: feeB + feeS + tax, net: gross - feeB - feeS - tax };
+}
+// side-aware：做多＝買 fill 賣 exit；做空＝賣 fill 買 exit（先賣後買，稅課在賣出=fill）
+function sideNet(side, fill, exit, lots) {
+  return side === "short" ? tradeNet(exit, fill, lots) : tradeNet(fill, exit, lots);
 }
 
 /* ---------- 資料載入 ---------- */
@@ -80,10 +84,11 @@ document.querySelectorAll(".tab").forEach((btn) =>
 function riskBadgeHtml(p) {
   // 今日選股的事前風險標註：以建議張數計「觸停損最壞虧損」，比照復盤的風險閘門口徑
   const rk = riskParams();
-  if (!rk.enabled || p.entry == null || p.stop == null || p.entry <= p.stop) return "";
-  const lots = sizeLots({ fill_price: p.entry, stop: p.stop }, rk);
-  const worst = -tradeNet(p.entry, p.stop, lots).net;
-  const worst1 = lots === 1 ? worst : -tradeNet(p.entry, p.stop, 1).net;
+  if (!rk.enabled || p.entry == null || p.stop == null || p.entry === p.stop) return "";
+  const side = p.side || "long";
+  const lots = sizeLots({ fill_price: p.entry, stop: p.stop, side }, rk);
+  const worst = -sideNet(side, p.entry, p.stop, lots).net;
+  const worst1 = lots === 1 ? worst : -sideNet(side, p.entry, p.stop, 1).net;
   if (worst1 > rk.daily_loss_limit)
     return `<div class="risk-line block">🛑 一張最壞 −${fmt(worst1)}，超過日限 −${fmt(rk.daily_loss_limit)}（風控會跳過此單）</div>`;
   if (worst > rk.daily_loss_limit * 0.5)
@@ -105,23 +110,30 @@ function stockCard(p, rank) {
     .map((id) => `<span class="tag" title="${stratMeta[id]?.desc || ""}">${stratMeta[id]?.name || id}</span>`)
     .join("");
   const chg = p.chg_pct;
+  const short = p.side === "short";
+  const sideBadge = `<span class="badge ${short ? "sside" : "lside"}" title="${short ? "做空：放空掛高、回補在低（現股當沖先賣後買）" : "做多：掛低買進、停利在高"}">${short ? "🔻 做空" : "🔺 做多"}</span>`;
+  const grid = short
+    ? `<div><div class="lb">建議放空 NH</div><div class="v tp">${fmt2(p.entry)}</div></div>
+       <div><div class="lb">回補停利 NL</div><div class="v buy">${fmt2(p.target)}</div></div>
+       <div><div class="lb">停損 AH</div><div class="v ah">${fmt2(p.stop)}</div></div>
+       <div><div class="lb">破底加碼 AL</div><div class="v sl">${fmt2(p.cdp_base?.al ?? p.target)}</div></div>`
+    : `<div><div class="lb">建議買進 NL</div><div class="v buy">${fmt2(p.entry ?? p.cdp?.nl)}</div></div>
+       <div><div class="lb">停利 NH</div><div class="v tp">${fmt2(p.target ?? p.cdp?.nh)}</div></div>
+       <div><div class="lb">停損 AL</div><div class="v sl">${fmt2(p.stop ?? p.cdp?.al)}</div></div>
+       <div><div class="lb">順勢突破 AH</div><div class="v ah">${fmt2(p.ah ?? p.cdp?.ah)}</div></div>`;
   return `<div class="card">
     <div class="head">
       ${rank ? `<span class="rank">#${rank}</span>` : ""}
       <span class="code">${p.code}</span><span class="name">${p.name}</span>
       <span class="mkt">${p.market === "tpex" ? "上櫃" : "上市"}</span>
+      ${sideBadge}
       ${p.fallback ? `<span class="badge fb" title="未達完整門檻（活躍策略命中不足），為湊滿觀察名單的遞補標的，信心較低">遞補</span>` : ""}
       <span class="score" title="綜合分數（策略權重加總）">${p.score}</span>
     </div>
     <div class="px">收盤 <b>${fmt2(p.close)}</b>
       <span class="${signCls(chg)}">${signTxt(chg)}${fmt2(chg)}%</span>${sparkline(p.spark)}</div>
     <div class="tags">${tags || '<span class="muted small">未觸發計分策略</span>'}</div>
-    <div class="price-grid">
-      <div><div class="lb">建議買進 NL</div><div class="v buy">${fmt2(p.entry ?? p.cdp?.nl)}</div></div>
-      <div><div class="lb">停利 NH</div><div class="v tp">${fmt2(p.target ?? p.cdp?.nh)}</div></div>
-      <div><div class="lb">停損 AL</div><div class="v sl">${fmt2(p.stop ?? p.cdp?.al)}</div></div>
-      <div><div class="lb">順勢突破 AH</div><div class="v ah">${fmt2(p.ah ?? p.cdp?.ah)}</div></div>
-    </div>
+    <div class="price-grid">${grid}</div>
     <div class="meta">
       <span>月均振幅 ${fmt2(p.amp_avg)}%</span>
       <span>成交 ${fmt(p.vol_lots)} 張</span>
@@ -141,32 +153,32 @@ function renderPicks() {
   const shifted = ["entry", "target", "stop"].some((k) => sh[k]);
   const exitMode = (sh.trail || sh.tstop != null)
     ? `、出場引擎：移動停利 ${sh.trail ? sh.trail + "R" : "關"}／時間停損 ${sh.tstop != null ? "12:00" : "關"}（A/B 實證擇優）` : "";
-  // 事前風險總覽：全下（依建議張數）觸停損的最壞合計
   const rk = riskParams();
+  const rg = d.regime || DB.market?.breadth || null;
+  const book = d.regime?.book || (d.picks?.[0]?.side) || "long";   // 今日建議單方向
+  // 事前風險總覽：全下（依建議張數）觸停損的最壞合計（side-aware）
   let riskSummary = "";
   if (rk.enabled && n) {
     const worstSum = d.picks.reduce((s, p) => {
-      if (p.entry == null || p.stop == null || p.entry <= p.stop) return s;
-      const lots = sizeLots({ fill_price: p.entry, stop: p.stop }, rk);
-      return s + -tradeNet(p.entry, p.stop, lots).net;
+      if (p.entry == null || p.stop == null || p.entry === p.stop) return s;
+      const lots = sizeLots({ fill_price: p.entry, stop: p.stop, side: p.side }, rk);
+      return s + -sideNet(p.side, p.entry, p.stop, lots).net;
     }, 0);
     riskSummary = `<br>🛡️ 依建議張數全下、全部觸停損的最壞合計約 <b>−${fmt(worstSum)}</b>；你的日限 <b>−${fmt(rk.daily_loss_limit)}</b>——盤中實際請依風險閘門順序進場（超額即停，卡片有逐檔標註）。`;
   }
   const nFb = (d.picks || []).filter((p) => p.fallback).length;
-  // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方
-  const rg = d.regime || DB.market?.breadth || null;
+  // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方→做多、<0.5 空方→做空
   const regimeChip = rg && rg.breadth_ma != null
-    ? `<span class="badge ${rg.bull ? "on" : "off"}" title="市場寬度＝全市場上漲家數比的 5 日均；<0.5 為跌多漲少的空方環境（實證該環境隔日當沖平均為負）">${rg.bull ? "🌤 多方環境" : "⛈ 空方環境"}｜寬度5MA ${(rg.breadth_ma * 100).toFixed(0)}%</span> ` : "";
-  const gatedOut = rg && rg.enabled && !rg.bull && !n;
+    ? `<span class="badge ${rg.bull ? "on" : "off"}" title="市場寬度＝全市場上漲家數比的 5 日均；≥50% 多方環境找做多、<50% 空方環境改找做空">${rg.bull ? "🌤 多方環境 → 做多名單" : "⛈ 空方環境 → 做空名單"}｜寬度5MA ${(rg.breadth_ma * 100).toFixed(0)}%</span> ` : "";
+  const bookTxt = book === "short"
+    ? `本日為<b class="down">做空名單</b>（現股當沖先賣後買／資券當沖）——空方環境改找弱勢破位股放空，而非空手` : "";
   $("#picksInfo").innerHTML = n
     ? `${regimeChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
-        ? `（完整門檻 ${n - nFb} 檔＋<b>遞補 ${nFb} 檔</b>——弱勢窗口活躍策略較少，遞補標的訊號較弱、信心自酌）` : ""}
-       <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。${shifted || exitMode
+        ? `（完整門檻 ${n - nFb} 檔＋<b>遞補 ${nFb} 檔</b>，遞補訊號較弱、信心自酌）` : ""}${bookTxt ? `<br>${bookTxt}` : ""}
+       <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。${(shifted || exitMode) && book === "long"
         ? `<br>📐 建議價已套用價格模型（進場 ${shiftTxt(sh.entry ?? 0)}、停利 ${shiftTxt(sh.target ?? 0)}、停損 ${shiftTxt(sh.stop ?? 0)}${exitMode}，依復盤自動迭代）。`
         : ""}${riskSummary}`
-    : gatedOut
-      ? `${regimeChip}🛑 <b>${d.generated_on}</b> 收盤後判定為<b>空方環境</b>（市場寬度 5 日均 ${(rg.breadth_ma * 100).toFixed(0)}% < 50%），依環境濾網<b>今日不出建議單</b>——實證顯示此環境下隔日當沖平均為負期望值，空手也是一種部位。可到「自訂選股」自行研究。`
-      : `本日基礎濾網後沒有符合門檻的標的（或歷史資料尚在累積）。可到「自訂選股」放寬條件。`;
+    : `${regimeChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`;
   $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
 
@@ -252,10 +264,10 @@ function riskParams() {
   return { ...RISK_DEFAULTS, ...(DB.config?.risk || {}), ...(settings.risk || {}) };
 }
 function sizeLots(p, rk) {
-  // 部位風險預算：每筆風險 ≈ per_trade_risk，故張數 = 預算 /（進場−停損）/1000，夾在 [1, max_lots]
-  if (rk.position_sizing === "risk_parity" && p.fill_price > p.stop) {
-    const perLot = (p.fill_price - p.stop) * 1000;
-    return Math.max(1, Math.min(rk.max_lots, Math.round(rk.per_trade_risk / perLot)));
+  // 部位風險預算：每筆風險 ≈ per_trade_risk，張數 = 預算 / |進場−停損| /1000，夾在 [1, max_lots]
+  const dist = Math.abs((p.fill_price ?? p.entry) - p.stop);   // 做多停損在下、做空在上，取絕對距離
+  if (rk.position_sizing === "risk_parity" && dist > 0) {
+    return Math.max(1, Math.min(rk.max_lots, Math.round(rk.per_trade_risk / (dist * 1000))));
   }
   return Math.max(1, Math.round(rk.lots || settings.lots || 1));
 }
@@ -269,7 +281,7 @@ function recomputeDay(day, limitOverride) {
   const rawByCode = {};
   day.picks.forEach((p) => {
     if (!p.filled) return;
-    const r = tradeNet(p.fill_price, p.exit_price, lots0);
+    const r = sideNet(p.side, p.fill_price, p.exit_price, lots0);
     rawNet += r.net; filled++; if (r.net > 0) rawWins++;
     rawByCode[p.code] = r.net;
   });
@@ -279,12 +291,12 @@ function recomputeDay(day, limitOverride) {
   const ann = {};
   order.forEach((p) => {
     const lots = rk.enabled ? sizeLots(p, rk) : lots0;
-    const r = tradeNet(p.fill_price, p.exit_price, lots);
+    const r = sideNet(p.side, p.fill_price, p.exit_price, lots);
     if (rk.enabled) {
       if (halted) { skipped++; ann[p.code] = { taken: false, lots, reason: "consec" }; return; }
       // 進場前風險閘門：這筆觸停損的最大淨虧損必須 ≤ 當日剩餘額度，否則不進場。
-      // 因實際出場價 ≥ 停損價，故此規則在數學上保證單日淨虧損永不超過上限。
-      const worstLoss = -tradeNet(p.fill_price, p.stop, lots).net;   // 觸停損的最大虧損（含費用，正值）
+      // 因實際出場價不優於停損價，故此規則在數學上保證單日淨虧損永不超過上限。
+      const worstLoss = -sideNet(p.side, p.fill_price, p.stop, lots).net;   // 觸停損的最大虧損（含費用，正值）
       const remaining = limit + mNet;                                // 剩餘可承受虧損（limit 可為 Infinity）
       if (worstLoss > remaining) { skipped++; ann[p.code] = { taken: false, lots, reason: "budget" }; return; }
     }
@@ -456,16 +468,18 @@ function renderReview() {
   $("#reviewList").innerHTML = [...daily].reverse().map((d, idx) => {
     const reasonTxt = { target: "停利", trail: "移動停利", stop: "停損", timeout: "時間停損", close: "收盤沖銷", nofill: "未成交" };
     const rows = d.rows.map((p) => {
-      if (!p.filled) return `<tr class="dim"><td>${p.code} ${p.name}</td><td>${fmt2(p.entry)}</td>
-        <td colspan="3">未成交（最低 ${fmt2(p.day_low)} 未觸價）</td><td>–</td></tr>`;
+      const sm = p.side === "short" ? '<span class="down" title="做空">🔻</span> ' : "";
+      const noFillTxt = p.side === "short" ? `未成交（最高 ${fmt2(p.day_high)} 未觸賣價）` : `未成交（最低 ${fmt2(p.day_low)} 未觸價）`;
+      if (!p.filled) return `<tr class="dim"><td>${sm}${p.code} ${p.name}</td><td>${fmt2(p.entry)}</td>
+        <td colspan="3">${noFillTxt}</td><td>–</td></tr>`;
       const m = p._m || {};
       if (!m.taken) {
         const why = m.reason === "consec" ? "🛑 連虧停手" : "🛑 超出當日風險額度";
-        return `<tr class="dim"><td>${p.code} ${p.name}</td><td>${fmt2(p.fill_price)}</td>
+        return `<tr class="dim"><td>${sm}${p.code} ${p.name}</td><td>${fmt2(p.fill_price)}</td>
         <td>${fmt2(p.exit_price)}</td><td colspan="2">${why}</td>
         <td class="muted">(未取 ${signTxt(p._net)}${fmt(p._net)})</td></tr>`;
       }
-      return `<tr><td>${p.code} ${p.name}</td><td>${fmt2(p.fill_price)}</td>
+      return `<tr><td>${sm}${p.code} ${p.name}</td><td>${fmt2(p.fill_price)}</td>
         <td>${fmt2(p.exit_price)}</td><td>${reasonTxt[p.exit_reason] || p.exit_reason}</td>
         <td>${m.lots} 張</td>
         <td class="${signCls(m.net)}">${signTxt(m.net)}${fmt(m.net)}</td></tr>`;

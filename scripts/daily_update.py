@@ -60,14 +60,17 @@ def weights_from_doc(doc):
 
 
 def regime_state(snapshots, cfg):
-    """大盤環境：市場寬度均值 ≥ 門檻為多方。enabled 時空方環境當晚不出建議單
-    （walk-forward 實證：空方環境的隔日當沖單平均為負期望值，不出手就是加分）。"""
+    """大盤環境：市場寬度均值 ≥ 門檻為多方、< 門檻為空方。
+    enabled 時據此切換選股方向：多方環境找做多、空方環境找做空
+    （walk-forward 實證：空方環境做多平均負期望值——不做多、改做空才對）。
+    book：當日建議單方向 long/short。"""
     rcfg = cfg.get("regime_filter") or {}
     b, bma = market_breadth(snapshots, rcfg.get("breadth_ma", 5))
     bull = (bma is None) or (bma >= rcfg.get("min_breadth", 0.5))
+    book = "long" if (bull or not rcfg.get("enabled")) else "short"
     return {"breadth": round(b, 3) if b is not None else None,
             "breadth_ma": round(bma, 3) if bma is not None else None,
-            "bull": bull, "enabled": bool(rcfg.get("enabled"))}
+            "bull": bull, "enabled": bool(rcfg.get("enabled")), "book": book}
 
 
 def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc):
@@ -76,10 +79,11 @@ def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc):
     weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
     shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
     regime = regime_state(snapshots, cfg)
-    picks = [] if (regime["enabled"] and not regime["bull"]) else screen(market, cfg, weights, shifts)
-    for m in market.values():  # 供前端自訂選股使用的個股觸發標記
-        score, hits = evaluate(m, weights)
-        m["score"], m["strategies"] = score, hits
+    picks = screen(market, cfg, weights, shifts, side=regime["book"])
+    for m in market.values():  # 供前端自訂選股使用的個股觸發標記（多空皆計）
+        sl, hl = evaluate(m, weights, "long")
+        ss, hs = evaluate(m, weights, "short")
+        m["score"], m["strategies"] = round(sl + ss, 2), hl + hs
     picks_doc = {
         "generated_on": latest_date,
         "generated_at": datetime.now(TAIPEI).isoformat(timespec="seconds"),
@@ -145,7 +149,7 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
         shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
         regime = regime_state(upto, cfg)       # 環境閘門同樣只看歷史（walk-forward 誠實）
-        picks = [] if (regime["enabled"] and not regime["bull"]) else screen(market, cfg, weights, shifts)
+        picks = screen(market, cfg, weights, shifts, side=regime["book"])
         picks_doc = {"generated_on": latest_date, "picks": picks}
         trade_date = snaps[i]["date"]
         bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff

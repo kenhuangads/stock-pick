@@ -110,8 +110,8 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
     for day in window:
         bars_by_code = load_intraday(day["date"])
         for r in day["picks"]:
-            if not r.get("cdp_base"):
-                continue
+            if not r.get("cdp_base") or r.get("side", "long") != "long":
+                continue   # 價格模型目前只優化做多側；做空單不參與（避免方向相反的偏移互相污染）
             b = bars_by_code.get(r["code"])
             ohlc = {"o": r["day_open"], "h": r["day_high"], "l": r["day_low"], "c": r["day_close"]}
             if b and not bars_match_ohlc(b, ohlc):
