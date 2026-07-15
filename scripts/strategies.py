@@ -248,36 +248,42 @@ def shifted_prices(c, day_range, shifts):
     return entry, target, stop
 
 
-def short_prices(c, day_range):
-    """做空建議價（CDP 對稱）：放空掛 NH（逆勢賣出區）、回補停利 NL、停損 AH（順勢突破＝看錯）。
-    做空 v1 用原始 CDP 價（價格模型目前只優化做多側，避免把多方最佳偏移錯套到空方）。
+def short_prices(c, day_range, shifts=None):
+    """做空建議價（CDP 完全鏡像＋空方獨立偏移，偏移一律「減」＝往市場方向移動）：
+    放空掛 NH−e·R（逆勢賣出區）、回補停利 NL−t·R、停損 AH−s·R（順勢突破＝看錯）。
+    偏移由 price_opt 以空方復盤紀錄獨立迭代（樣本不足時暫借做多偏移）。
     保證 停損 > 進場 > 停利。"""
-    entry = round_tick(c["nh"], "up")
-    target = round_tick(c["nl"], "down")
-    stop = round_tick(c["ah"], "up")
+    s = shifts or {}
+    entry = round_tick(c["nh"] - s.get("entry", 0) * day_range, "up")
+    target = round_tick(c["nl"] - s.get("target", 0) * day_range, "down")
+    stop = round_tick(c["ah"] - s.get("stop", 0) * day_range, "up")
     stop = max(stop, round_tick(entry + tick_size(entry), "up"))     # 停損必須高於進場
     target = min(target, round_tick(entry - tick_size(entry), "down"))  # 停利必須低於進場
     return entry, target, stop
 
 
 def make_pick(m, score, hits, discount, price_shifts=None, side="long"):
-    """由 CDP＋價格模型偏移產生隔日建議買賣價。
-    做多：NL 掛買、NH 停利、AL 停損（＋價格模型偏移）；做空：NH 放空、NL 回補、AH 停損。
-    出場引擎（移動停利/時間停損）兩側共用（R 為單位、方向無關）。"""
+    """由 CDP＋價格模型偏移產生隔日建議買賣價（多空各用各的偏移組）。
+    做多：NL 掛買、NH 停利、AL 停損；做空：NH 放空、NL 回補、AH 停損。
+    出場引擎（移動停利/時間停損）依所屬方向的偏移組決定。"""
     c = m["cdp"]
     day_range = m["high"] - m["low"]
     if side == "short":
-        entry, target, stop = short_prices(c, day_range)
+        ss = (price_shifts or {}).get("short") or {}
+        entry, target, stop = short_prices(c, day_range, ss)
+        trail_mult = ss.get("trail") or 0
+        tstop = ss.get("tstop")
     else:
         entry, target, stop = shifted_prices(c, day_range, price_shifts)
-    trail_mult = (price_shifts or {}).get("trail") or 0
+        trail_mult = (price_shifts or {}).get("trail") or 0
+        tstop = (price_shifts or {}).get("tstop")
     return {
         "code": m["code"], "name": m["name"], "market": m["market"], "side": side,
         "close": m["close"], "chg_pct": m["chg_pct"],
         "score": score, "strategies": hits,
         "entry": entry, "target": target, "stop": stop, "ah": c["ah"],
         "trail_dist": round(trail_mult * day_range, 2) if trail_mult else None,
-        "tstop_bar": (price_shifts or {}).get("tstop"),
+        "tstop_bar": tstop,
         "cdp_base": {"nl": c["nl"], "nh": c["nh"], "al": c["al"], "ah": c["ah"], "r": round(day_range, 2)},
         "breakeven_ticks": breakeven_ticks(entry, discount),
         "amp_avg": m["amp_avg"], "vol_lots": m["vol_lots"],
@@ -286,11 +292,27 @@ def make_pick(m, score, hits, discount, price_shifts=None, side="long"):
     }
 
 
-def screen(market, cfg, weights, price_shifts=None, side="long"):
+def tradeable_1lot(p, cfg):
+    """可交易性：1 張觸停損的最壞虧損（含約略費用）不得超過每日虧損上限。
+    超過者對使用者是「不可執行的建議」（風險閘門必跳過、佔名額無意義），直接不入選。"""
+    risk = cfg.get("risk") or {}
+    if not risk.get("screen_tradeable", True):
+        return True
+    limit = risk.get("daily_loss_limit")
+    if not limit:
+        return True
+    fees = cfg["fees"]
+    est_fees = p["entry"] * 1000 * (fees["fee_rate"] * fees["default_discount"] * 2 + fees["daytrade_tax"])
+    worst = abs(p["entry"] - p["stop"]) * 1000 + est_fees
+    return worst <= limit
+
+
+def screen(market, cfg, weights, price_shifts=None, side="long", allow_fallback=True):
     """全市場掃描 → 依綜合分數排序的推薦清單（指定方向 long/short）。
     門檻只計「有權重的策略」命中數，候選/停用策略純追蹤、不影響入選。
+    可交易性濾網：1 張最壞虧損 > 每日上限者不入選（推薦必須是使用者做得起的單）。
 
-    遞補機制：弱勢窗口下活躍策略減少、完整門檻可能選不滿 max_picks——
+    遞補機制（allow_fallback）：弱勢窗口下活躍策略減少、完整門檻可能選不滿 max_picks——
     此時從「通過基礎濾網且有觸發訊號（含候選/停用追蹤）」者依
     (活躍命中數, 綜合分數, 總命中數, 振幅) 遞補湊滿，並標記 fallback=True
     讓前端明示信心等級較低。遞補單照常復盤，維持樣本累積讓停用策略有機會翻身。"""
@@ -306,13 +328,15 @@ def screen(market, cfg, weights, price_shifts=None, side="long"):
             continue
         active_hits = [h for h in hits if weights.get(h, 0) > 0]
         p = make_pick(m, score, hits, discount, price_shifts, side)
+        if not tradeable_1lot(p, cfg):
+            continue
         if len(active_hits) >= min_trig and score > 0:
             picks.append(p)
         else:
             bench.append((len(active_hits), score, len(hits), p))
     picks.sort(key=lambda p: (-p["score"], -p["amp_avg"]))
     picks = picks[:max_picks]
-    if len(picks) < max_picks and bench:
+    if allow_fallback and len(picks) < max_picks and bench:
         bench.sort(key=lambda x: (-x[0], -x[1], -x[2], -x[3]["amp_avg"]))
         for _, _, _, p in bench[: max_picks - len(picks)]:
             p["fallback"] = True

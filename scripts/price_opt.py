@@ -1,9 +1,16 @@
-"""價格模型迭代：建議進出場價也跟著復盤結果滾動優化。
+"""價格模型迭代：建議進出場價也跟著復盤結果滾動優化（多空各自獨立優化）。
 
-建議價 = CDP 基準價 + 偏移 × 當日振幅R：
+做多建議價 = CDP 基準價 + 偏移 × 當日振幅R：
   entry  = NL + entry_shift·R   （掛買價：往下=更好的價、但更難成交）
   target = NH + target_shift·R  （停利價：往上=賺更多、但更難觸及）
   stop   = AL + stop_shift·R    （停損價：往上=停損更緊、砍得快）
+
+做空為完全鏡像（偏移一律「減」＝往市場方向移動）：
+  entry  = NH − entry_shift·R   （掛空價：往下=更容易成交、但空得較差）
+  target = NL − target_shift·R  （回補價：往上=更容易回補停利）
+  stop   = AH − stop_shift·R    （停損價：往下=停損更緊）
+做空樣本不足 min_trades 時，暫借做多側偏移起步（成交物理對稱），
+樣本累積夠後即獨立走 walk-forward 網格優化、與做多互不污染。
 
 每日收盤後（walk-forward，只用歷史）：
 1. 取最近 window_days 個復盤日的建議單，用其記錄的 cdp_base + 當日實際 OHLC，
@@ -28,22 +35,29 @@
 4. 所有切換寫入 log，前端「每日復盤」頁完整呈現診斷與軌跡。
 """
 from indicators import round_tick, tick_size
-from review import trade_fees, simulate_trade, bars_match_ohlc, limit_down_price
+from review import trade_fees, simulate_trade, bars_match_ohlc, limit_down_price, limit_up_price
 from intraday import load_intraday
 
 ZERO = {"entry": 0.0, "target": 0.0, "stop": 0.0, "trail": 0.0, "tstop": None}
 
 
-def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False):
+def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="long"):
     """用復盤紀錄裡的 cdp_base 與當日行情（5分K優先），以指定偏移＋出場模式重放一筆模擬。
     回傳 (filled, net, exit_reason)。走 review.simulate_trade 共用核心，口徑一致。"""
     base = rec["cdp_base"]
     r = base["r"]
-    entry = round_tick(base["nl"] + shifts["entry"] * r, "down")
-    target = round_tick(base["nh"] + shifts["target"] * r, "up")
-    stop = round_tick(base["al"] + shifts["stop"] * r, "down")
-    stop = min(stop, round_tick(entry - tick_size(entry), "down"))
-    target = max(target, round_tick(entry + tick_size(entry), "up"))
+    if side == "short":
+        entry = round_tick(base["nh"] - shifts["entry"] * r, "up")
+        target = round_tick(base["nl"] - shifts["target"] * r, "down")
+        stop = round_tick(base["ah"] - shifts["stop"] * r, "up")
+        stop = max(stop, round_tick(entry + tick_size(entry), "up"))
+        target = min(target, round_tick(entry - tick_size(entry), "down"))
+    else:
+        entry = round_tick(base["nl"] + shifts["entry"] * r, "down")
+        target = round_tick(base["nh"] + shifts["target"] * r, "up")
+        stop = round_tick(base["al"] + shifts["stop"] * r, "down")
+        stop = min(stop, round_tick(entry - tick_size(entry), "down"))
+        target = max(target, round_tick(entry + tick_size(entry), "up"))
     trail_mult = shifts.get("trail") or 0
     trail_dist = round(trail_mult * r, 2) if trail_mult else None
     tstop_bar = shifts.get("tstop")
@@ -51,21 +65,27 @@ def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False):
     ohlc = {"o": rec["day_open"], "h": rec["day_high"], "l": rec["day_low"], "c": rec["day_close"]}
     filled, fill, exit_price, reason, _ = simulate_trade(
         entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
-        strict_fill=strict_fill, limit_dn=limit_down_price(rec.get("prev_close")))
+        strict_fill=strict_fill, limit_dn=limit_down_price(rec.get("prev_close")),
+        side=side, limit_up=limit_up_price(rec.get("prev_close")))
     if not filled:
-        # 未成交；若收盤高於掛價代表「掛太低錯過行情」
-        return False, 0, ("runaway" if ohlc["c"] > entry else "nofill")
-    fee_b, fee_s, tax = trade_fees(fill, exit_price, lots, fees_cfg)
-    net = int((exit_price - fill) * lots * 1000) - fee_b - fee_s - tax
+        # 未成交且行情往獲利方向跑掉＝「掛太遠錯過行情」（做多看漲過掛價、做空看跌破掛價）
+        runaway = ohlc["c"] > entry if side == "long" else ohlc["c"] < entry
+        return False, 0, ("runaway" if runaway else "nofill")
+    if side == "short":
+        fee_b, fee_s, tax = trade_fees(exit_price, fill, lots, fees_cfg)  # 先賣(fill)後買(exit)，稅課賣出腿
+        net = int((fill - exit_price) * lots * 1000) - fee_b - fee_s - tax
+    else:
+        fee_b, fee_s, tax = trade_fees(fill, exit_price, lots, fees_cfg)
+        net = int((exit_price - fill) * lots * 1000) - fee_b - fee_s - tax
     return True, net, reason
 
 
-def _replay(records, shifts, fees_cfg, lots, strict_fill=False):
+def _replay(records, shifts, fees_cfg, lots, strict_fill=False, side="long"):
     """整個窗口以指定偏移＋出場模式重放，回傳統計。records: [(rec, bars), ...]"""
     stat = {"n": len(records), "fills": 0, "net": 0, "wins": 0, "gw": 0, "gl": 0,
             "target": 0, "stop": 0, "close": 0, "trail": 0, "timeout": 0, "runaway": 0}
     for rec, bars in records:
-        filled, net, reason = _sim_one(rec, shifts, fees_cfg, lots, bars, strict_fill)
+        filled, net, reason = _sim_one(rec, shifts, fees_cfg, lots, bars, strict_fill, side)
         if filled:
             stat["fills"] += 1
             stat["net"] += net
@@ -94,35 +114,35 @@ def _pct(a, b):
     return round(a / b * 100, 1) if b else None
 
 
-def run_price_opt(reviews, cfg, prev_doc, as_of_date):
-    """回傳 (shifts, price_doc)。歷史紀錄缺 cdp_base（舊格式）時自動略過該筆。"""
-    pcfg = cfg.get("price_optimizer")
-    if not pcfg:
-        return dict(ZERO), None
+def _stats_block(cur, base, target_fr):
+    return {
+        "n_picks": cur["n"],
+        "fills": cur["fills"],
+        "fill_rate": _pct(cur["fills"], cur["n"]),
+        "fill_target": round(target_fr * 100, 1) if target_fr else None,
+        "win_rate": _pct(cur["wins"], cur["fills"]),
+        "payoff": (round(_payoff(cur), 2) if _payoff(cur) != float("inf") else None),  # 賺賠比
+        "target_rate": _pct(cur["target"], cur["fills"]),
+        "trail_rate": _pct(cur["trail"], cur["fills"]),
+        "stop_rate": _pct(cur["stop"], cur["fills"]),
+        "timeout_rate": _pct(cur["timeout"], cur["fills"]),
+        "close_rate": _pct(cur["close"], cur["fills"]),
+        "runaway_rate": _pct(cur["runaway"], cur["n"]),  # 掛價過遠、行情跑掉的比率
+        "net": cur["net"],
+        "net_baseline": base["net"],                     # 0 偏移（原始 CDP）對照組
+    }
 
-    current = dict(ZERO)
-    if prev_doc and prev_doc.get("shifts"):
-        current.update(prev_doc["shifts"])
-    log = (prev_doc or {}).get("log", [])
 
-    window = reviews[-pcfg["window_days"]:] if reviews else []
-    records = []
-    for day in window:
-        bars_by_code = load_intraday(day["date"])
-        for r in day["picks"]:
-            if not r.get("cdp_base") or r.get("side", "long") != "long":
-                continue   # 價格模型目前只優化做多側；做空單不參與（避免方向相反的偏移互相污染）
-            b = bars_by_code.get(r["code"])
-            ohlc = {"o": r["day_open"], "h": r["day_high"], "l": r["day_low"], "c": r["day_close"]}
-            if b and not bars_match_ohlc(b, ohlc):
-                b = None  # 資料品質防線：與官方日K不符的 5分K 不得參與重放
-            records.append((r, b))
-    fees_cfg, lots = cfg["fees"], cfg["simulation"]["lots_per_trade"]
-    strict = cfg.get("simulation", {}).get("strict_fill", False)
-
-    base = _replay(records, ZERO, fees_cfg, lots, strict)
-    cur = _replay(records, current, fees_cfg, lots, strict)
+def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_date, side):
+    """單一方向的網格搜尋＋遲滯切換。回傳 (current_shifts, cur_stat, base_stat)。
+    records 為該方向的復盤紀錄；current 為現行偏移（就地不改，回傳新 dict）。"""
+    label = "做多" if side == "long" else "空方"
     target_fr = pcfg.get("target_fill_rate", 0)
+    objective = pcfg.get("objective", "net")
+    current = dict(current)
+
+    base = _replay(records, ZERO, fees_cfg, lots, strict, side)
+    cur = _replay(records, current, fees_cfg, lots, strict, side)
 
     def fill_rate(st):
         return st["fills"] / st["n"] if st["n"] else 0.0
@@ -132,8 +152,6 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
 
     def qualified(st):
         return fill_rate(st) >= target_fr
-
-    objective = pcfg.get("objective", "net")
 
     if base["fills"] >= pcfg["min_trades"]:
         grid_entry = pcfg.get("entry_grid") or pcfg.get("shift_grid", [])
@@ -149,7 +167,7 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
                     for t in grid_trail:
                         for ts in grid_tstop:
                             sh = {"entry": a, "target": b, "stop": c, "trail": t, "tstop": ts}
-                            st = _replay(records, sh, fees_cfg, lots, strict)
+                            st = _replay(records, sh, fees_cfg, lots, strict, side)
                             # 同分時偏好較小偏移與較簡單的出場模式（防過擬合傾向）
                             dist0 = abs(a) + abs(b) + abs(c) + (0.01 if t else 0) + (0.01 if ts is not None else 0)
                             scored.append((sh, st, dist0))
@@ -172,7 +190,6 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
         if best_sh != current:
             cur_q, best_q = qualified(cur), qualified(best_st)
             if objective == "winrate":
-                # 達標且正期望值下，勝率明顯提升(≥2pp)才換；或從「未達標/負期望值」進步到「達標且正期望值」
                 cur_ok = cur_q and cur["net"] > 0
                 best_ok = best_q and best_st["net"] > 0
                 switch = (best_ok and not cur_ok) or \
@@ -196,7 +213,7 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
                     p = _payoff(st)
                     return "∞" if p == float("inf") else f"{p:.2f}"
                 log.append({"date": as_of_date,
-                            "msg": f"價格模型調整：進場 {current['entry']:+.2f}→{best_sh['entry']:+.2f}R、"
+                            "msg": f"{label}價格模型調整：進場 {current['entry']:+.2f}→{best_sh['entry']:+.2f}R、"
                                    f"停利 {current['target']:+.2f}→{best_sh['target']:+.2f}R、"
                                    f"停損 {current['stop']:+.2f}→{best_sh['stop']:+.2f}R、{_mode(best_sh)}"
                                    f"（成交率 {fill_rate(cur)*100:.1f}%→{fill_rate(best_st)*100:.1f}%、"
@@ -205,26 +222,64 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
                                    f"窗口淨損益 {cur['net']:,} → {best_st['net']:,} 元）"})
                 current, cur = best_sh, best_st
 
+    return current, cur, base
+
+
+def run_price_opt(reviews, cfg, prev_doc, as_of_date):
+    """多空各自優化。回傳 (shifts, price_doc)——shifts 頂層為做多偏移（相容舊介面），
+    做空偏移在 shifts["short"]。歷史紀錄缺 cdp_base（舊格式）時自動略過該筆。"""
+    pcfg = cfg.get("price_optimizer")
+    if not pcfg:
+        return dict(ZERO), None
+
+    cur_long = dict(ZERO)
+    if prev_doc and prev_doc.get("shifts"):
+        cur_long.update({k: v for k, v in prev_doc["shifts"].items() if k in ZERO})
+    cur_short = dict(ZERO)
+    if prev_doc and prev_doc.get("short_shifts"):
+        cur_short.update(prev_doc["short_shifts"])
+    log = (prev_doc or {}).get("log", [])
+
+    window = reviews[-pcfg["window_days"]:] if reviews else []
+    recs = {"long": [], "short": []}
+    for day in window:
+        bars_by_code = load_intraday(day["date"])
+        for r in day["picks"]:
+            side = r.get("side", "long")
+            base = r.get("cdp_base")
+            if not base or (side == "short" and "ah" not in base):
+                continue
+            b = bars_by_code.get(r["code"])
+            ohlc = {"o": r["day_open"], "h": r["day_high"], "l": r["day_low"], "c": r["day_close"]}
+            if b and not bars_match_ohlc(b, ohlc):
+                b = None  # 資料品質防線：與官方日K不符的 5分K 不得參與重放
+            recs[side].append((r, b))
+    fees_cfg, lots = cfg["fees"], cfg["simulation"]["lots_per_trade"]
+    strict = cfg.get("simulation", {}).get("strict_fill", False)
+    target_fr = pcfg.get("target_fill_rate", 0)
+
+    cur_long, stat_long, base_long = _optimize_side(
+        recs["long"], pcfg, fees_cfg, lots, strict, cur_long, log, as_of_date, "long")
+
+    # 做空側：樣本不足時暫借做多偏移起步（掛單成交的物理對稱：偏移一律往市場方向移動）
+    base_short_probe = _replay(recs["short"], ZERO, fees_cfg, lots, strict, "short")
+    if base_short_probe["fills"] < pcfg["min_trades"] and cur_short == ZERO and cur_long != ZERO:
+        cur_short = dict(cur_long)
+        log.append({"date": as_of_date,
+                    "msg": f"空方價格模型樣本不足（窗口成交 {base_short_probe['fills']} 筆 < {pcfg['min_trades']}），"
+                           f"暫借做多側偏移起步（進場 {cur_long['entry']:+.2f}R 等），樣本足夠後自動獨立優化"})
+    cur_short, stat_short, base_short = _optimize_side(
+        recs["short"], pcfg, fees_cfg, lots, strict, cur_short, log, as_of_date, "short")
+
     doc = {
         "updated": as_of_date,
         "window_days": pcfg["window_days"],
-        "shifts": current,
-        "stats": {
-            "n_picks": cur["n"],
-            "fills": cur["fills"],
-            "fill_rate": _pct(cur["fills"], cur["n"]),
-            "fill_target": round(target_fr * 100, 1) if target_fr else None,
-            "win_rate": _pct(cur["wins"], cur["fills"]),
-            "payoff": (round(_payoff(cur), 2) if _payoff(cur) != float("inf") else None),  # 賺賠比
-            "target_rate": _pct(cur["target"], cur["fills"]),
-            "trail_rate": _pct(cur["trail"], cur["fills"]),
-            "stop_rate": _pct(cur["stop"], cur["fills"]),
-            "timeout_rate": _pct(cur["timeout"], cur["fills"]),
-            "close_rate": _pct(cur["close"], cur["fills"]),
-            "runaway_rate": _pct(cur["runaway"], cur["n"]),  # 掛價過低、行情跑掉的比率
-            "net": cur["net"],
-            "net_baseline": base["net"],                     # 0 偏移（原始 CDP）對照組
-        },
+        "shifts": cur_long,
+        "short_shifts": cur_short,
+        "stats": _stats_block(stat_long, base_long, target_fr),
+        "short_stats": _stats_block(stat_short, base_short, target_fr),
         "log": log[-100:],
     }
-    return current, doc
+    combined = dict(cur_long)
+    combined["short"] = cur_short
+    return combined, doc

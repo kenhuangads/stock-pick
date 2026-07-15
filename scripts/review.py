@@ -215,6 +215,7 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
     side = pick.get("side", "long")
     r = {
         "code": pick["code"], "name": pick["name"], "market": pick.get("market"), "side": side,
+        "counter": pick.get("counter"), "fallback": pick.get("fallback"),  # 逆勢/遞補標記（績效歸因用）
         "score": pick["score"], "strategies": pick["strategies"],
         "entry": pick["entry"], "target": pick["target"], "stop": pick["stop"],
         "trail_dist": pick.get("trail_dist"), "tstop_bar": pick.get("tstop_bar"),

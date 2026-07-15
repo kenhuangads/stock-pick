@@ -61,9 +61,9 @@ def weights_from_doc(doc):
 
 def regime_state(snapshots, cfg):
     """大盤環境：市場寬度均值 ≥ 門檻為多方、< 門檻為空方。
-    enabled 時據此切換選股方向：多方環境找做多、空方環境找做空
-    （walk-forward 實證：空方環境做多平均負期望值——不做多、改做空才對）。
-    book：當日建議單方向 long/short。"""
+    enabled 時據此決定「主方向」：多方環境以做多為主、空方環境以做空為主
+    （walk-forward 實證：空方環境做多平均負期望值——主力不做多、改做空）。
+    book：當日主方向 long/short（逆勢配額另由 screen_book 處理）。"""
     rcfg = cfg.get("regime_filter") or {}
     b, bma = market_breadth(snapshots, rcfg.get("breadth_ma", 5))
     bull = (bma is None) or (bma >= rcfg.get("min_breadth", 0.5))
@@ -73,13 +73,37 @@ def regime_state(snapshots, cfg):
             "bull": bull, "enabled": bool(rcfg.get("enabled")), "book": book}
 
 
+def screen_book(market, cfg, weights, shifts, regime):
+    """組當日建議單：主方向（順大盤環境）為主，保留少量「逆勢配額」給另一方向——
+    當沖多空皆有機會，環境判定也可能錯；逆勢單門檻更嚴（counter_min_hits）、
+    無遞補、數量受 counter_quota 限制，並標記 counter=True 供前端明示與後續實證。
+    總檔數維持 max_picks：主方向 = max_picks − 實際逆勢檔數。"""
+    rcfg = cfg.get("regime_filter") or {}
+    main = regime["book"]
+    counter = "short" if main == "long" else "long"
+    max_picks = cfg.get("max_picks", 8)
+    counter_picks = []
+    quota = int(rcfg.get("counter_quota", 0) or 0)
+    if regime["enabled"] and quota > 0:
+        c2 = dict(cfg)
+        c2["max_picks"] = quota
+        c2["min_strategies_triggered"] = rcfg.get("counter_min_hits", 3)
+        counter_picks = screen(market, c2, weights, shifts, side=counter, allow_fallback=False)
+        for p in counter_picks:
+            p["counter"] = True
+    c1 = dict(cfg)
+    c1["max_picks"] = max(0, max_picks - len(counter_picks))
+    main_picks = screen(market, c1, weights, shifts, side=main)
+    return main_picks + counter_picks
+
+
 def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc):
     """由（時間排序的）快照序列產生 market/picks/strategies/price_model 輸出。"""
     latest_date, market = build_market(snapshots)
     weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
     shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
     regime = regime_state(snapshots, cfg)
-    picks = screen(market, cfg, weights, shifts, side=regime["book"])
+    picks = screen_book(market, cfg, weights, shifts, regime)
     for m in market.values():  # 供前端自訂選股使用的個股觸發標記（多空皆計）
         sl, hl = evaluate(m, weights, "long")
         ss, hs = evaluate(m, weights, "short")
@@ -149,7 +173,7 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
         shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
         regime = regime_state(upto, cfg)       # 環境閘門同樣只看歷史（walk-forward 誠實）
-        picks = screen(market, cfg, weights, shifts, side=regime["book"])
+        picks = screen_book(market, cfg, weights, shifts, regime)
         picks_doc = {"generated_on": latest_date, "picks": picks}
         trade_date = snaps[i]["date"]
         bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff

@@ -127,6 +127,7 @@ function stockCard(p, rank) {
       <span class="code">${p.code}</span><span class="name">${p.name}</span>
       <span class="mkt">${p.market === "tpex" ? "上櫃" : "上市"}</span>
       ${sideBadge}
+      ${p.counter ? `<span class="badge ct" title="逆勢配額：與大盤環境主方向相反、以更嚴門檻（活躍命中 ≥3）選出的實驗性標的——環境判定可能錯、強勢股也可能逆勢走，信心自酌">逆勢</span>` : ""}
       ${p.fallback ? `<span class="badge fb" title="未達完整門檻（活躍策略命中不足），為湊滿觀察名單的遞補標的，信心較低">遞補</span>` : ""}
       <span class="score" title="綜合分數（策略權重加總）">${p.score}</span>
     </div>
@@ -167,17 +168,22 @@ function renderPicks() {
     riskSummary = `<br>🛡️ 依建議張數全下、全部觸停損的最壞合計約 <b>−${fmt(worstSum)}</b>；你的日限 <b>−${fmt(rk.daily_loss_limit)}</b>——盤中實際請依風險閘門順序進場（超額即停，卡片有逐檔標註）。`;
   }
   const nFb = (d.picks || []).filter((p) => p.fallback).length;
-  // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方→做多、<0.5 空方→做空
+  const nCt = (d.picks || []).filter((p) => p.counter).length;
+  const nShort = (d.picks || []).filter((p) => p.side === "short").length;
+  const nLong = n - nShort;
+  // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方主做多、<0.5 空方主做空
   const regimeChip = rg && rg.breadth_ma != null
-    ? `<span class="badge ${rg.bull ? "on" : "off"}" title="市場寬度＝全市場上漲家數比的 5 日均；≥50% 多方環境找做多、<50% 空方環境改找做空">${rg.bull ? "🌤 多方環境 → 做多名單" : "⛈ 空方環境 → 做空名單"}｜寬度5MA ${(rg.breadth_ma * 100).toFixed(0)}%</span> ` : "";
-  const bookTxt = book === "short"
-    ? `本日為<b class="down">做空名單</b>（現股當沖先賣後買／資券當沖）——空方環境改找弱勢破位股放空，而非空手` : "";
+    ? `<span class="badge ${rg.bull ? "on" : "off"}" title="市場寬度＝全市場上漲家數比的 5 日均；≥50% 多方環境以做多為主、<50% 空方環境以做空為主，另保留少量更嚴門檻的逆勢配額">${rg.bull ? "🌤 多方環境 → 做多為主" : "⛈ 空方環境 → 做空為主"}｜寬度5MA ${(rg.breadth_ma * 100).toFixed(0)}%</span> ` : "";
+  const mixTxt = n
+    ? `本日名單：${nLong ? `🔺做多 <b>${nLong}</b> 檔` : ""}${nLong && nShort ? "＋" : ""}${nShort ? `🔻做空 <b class="down">${nShort}</b> 檔（現股當沖先賣後買）` : ""}${nCt
+        ? `，其中 <b>${nCt}</b> 檔為<b>逆勢配額</b>（與大盤環境反向、門檻更嚴，實驗性質信心自酌）` : ""}` : "";
+  const shS = sh.short || {};
+  const priceLine = (shifted || exitMode || nShort)
+    ? `<br>📐 價格模型（多空各自迭代）：${nLong ? `做多 進${shiftTxt(sh.entry ?? 0)}/停利${shiftTxt(sh.target ?? 0)}/停損${shiftTxt(sh.stop ?? 0)}` : ""}${nLong && nShort ? "；" : ""}${nShort ? `做空 進−${shS.entry ?? 0}R/回補−${shS.target ?? 0}R/停損−${shS.stop ?? 0}R` : ""}${exitMode}` : "";
   $("#picksInfo").innerHTML = n
     ? `${regimeChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
-        ? `（完整門檻 ${n - nFb} 檔＋<b>遞補 ${nFb} 檔</b>，遞補訊號較弱、信心自酌）` : ""}${bookTxt ? `<br>${bookTxt}` : ""}
-       <br>已排除處置股／注意股／非當沖標的／流動性與波動不足者，依策略權重綜合評分排序。${(shifted || exitMode) && book === "long"
-        ? `<br>📐 建議價已套用價格模型（進場 ${shiftTxt(sh.entry ?? 0)}、停利 ${shiftTxt(sh.target ?? 0)}、停損 ${shiftTxt(sh.stop ?? 0)}${exitMode}，依復盤自動迭代）。`
-        : ""}${riskSummary}`
+        ? `（含遞補 ${nFb} 檔，訊號較弱）` : ""}${mixTxt ? `<br>${mixTxt}` : ""}
+       <br>已排除處置股／注意股／非當沖標的／不可放空者（做空單）／1張風險超日限者／流動性與波動不足者。${priceLine}${riskSummary}`
     : `${regimeChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`;
   $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
@@ -519,6 +525,16 @@ function renderPriceModel() {
     <div class="stat"><div class="lb">停損出場占比</div><div class="v down">${s.stop_rate ?? "–"}%</div></div>
     ${s.timeout_rate ? `<div class="stat"><div class="lb">時間停損占比</div><div class="v">${s.timeout_rate}%</div></div>` : ""}
     <div class="stat"><div class="lb">掛價過低錯失率</div><div class="v">${s.runaway_rate ?? "–"}%</div></div>`;
+  // 空方價格模型（獨立偏移與統計）
+  const ss = pm.short_stats, shS = pm.short_shifts || {};
+  if (ss && ss.n_picks) {
+    const sfrCls = ss.fill_target == null ? "" : (ss.fill_rate ?? 0) >= ss.fill_target ? "up" : "down";
+    $("#priceModelInfo").innerHTML += `<br>🔻 <b>空方（獨立迭代）</b>：放空 NH−<b>${shS.entry ?? 0}R</b> ·
+      回補 NL−<b>${shS.target ?? 0}R</b> · 停損 AH−<b>${shS.stop ?? 0}R</b> · 移動停利 <b>${shS.trail ? shS.trail + "R" : "關"}</b> ·
+      時間停損 <b>${shS.tstop != null ? "12:00" : "關"}</b>
+      ｜窗口：成交率 <b class="${sfrCls}">${ss.fill_rate ?? "–"}%</b> · 賺賠比 <b>${ss.payoff ?? "–"}</b> ·
+      淨損益 <b>${fmt(ss.net)}</b> vs 原始 CDP <b>${fmt(ss.net_baseline)}</b> 元`;
+  }
   const log = pm.log || [];
   $("#priceModelLog").innerHTML = log.length
     ? [...log].reverse().slice(0, 10).map((l) => `<div class="log-item"><span class="d">${l.date}</span>${l.msg}</div>`).join("")
