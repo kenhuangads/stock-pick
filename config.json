@@ -14,6 +14,7 @@
   },
   "max_picks": 8,
   "min_strategies_triggered": 2,
+  "fallback_max": 2,
   "fees": {
     "fee_rate": 0.001425,
     "default_discount": 0.28,
@@ -27,7 +28,8 @@
     "enable_expectancy_above": 0.001,
     "weight_min": 0.3,
     "weight_max": 2.0,
-    "min_active": 6
+    "min_active": 6,
+    "probation_trades": 3
   },
   "price_optimizer": {
     "window_days": 20,
@@ -70,6 +72,8 @@
     ],
     "tstop_grid": [
       null,
+      24,
+      30,
       36
     ],
     "target_fill_rate": 0.67,

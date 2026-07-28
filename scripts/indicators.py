@@ -153,8 +153,14 @@ def market_breadth(snapshots, ma=5):
     寬度均值 < 0.5 代表跌多漲少的空方環境——70 日實證該環境下隔日當沖平均為負。"""
     if len(snapshots) < 2:
         return None, None
+    vals = _breadth_daily(snapshots[-(ma + 1):])
+    return vals[-1], sum(vals) / len(vals)
+
+
+def _breadth_daily(snapshots):
+    """逐日寬度序列（相鄰兩快照比收盤）。"""
     vals = []
-    for prev, cur in zip(snapshots[-(ma + 1):-1], snapshots[-ma:]):
+    for prev, cur in zip(snapshots, snapshots[1:]):
         up = dn = 0
         for code, k in cur["stocks"].items():
             p = prev["stocks"].get(code)
@@ -164,7 +170,17 @@ def market_breadth(snapshots, ma=5):
                 elif k["c"] < p["c"]:
                     dn += 1
         vals.append(up / (up + dn) if up + dn else 0.5)
-    return vals[-1], sum(vals) / len(vals)
+    return vals
+
+
+def market_breadth_ma_series(snapshots, ma=5):
+    """寬度 ma 日均值的完整時間序列（環境遲滯帶重放用；不足 ma 日以現有天數均）。"""
+    daily = _breadth_daily(snapshots)
+    out = []
+    for i in range(len(daily)):
+        w = daily[max(0, i - ma + 1): i + 1]
+        out.append(sum(w) / len(w))
+    return out
 
 
 def breakeven_ticks(price: float, discount: float = 0.28) -> int:

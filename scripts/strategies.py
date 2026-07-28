@@ -314,8 +314,10 @@ def screen(market, cfg, weights, price_shifts=None, side="long", allow_fallback=
 
     遞補機制（allow_fallback）：弱勢窗口下活躍策略減少、完整門檻可能選不滿 max_picks——
     此時從「通過基礎濾網且有觸發訊號（含候選/停用追蹤）」者依
-    (活躍命中數, 綜合分數, 總命中數, 振幅) 遞補湊滿，並標記 fallback=True
-    讓前端明示信心等級較低。遞補單照常復盤，維持樣本累積讓停用策略有機會翻身。"""
+    (活躍命中數, 綜合分數, 總命中數, 振幅) 遞補，並標記 fallback=True
+    讓前端明示信心等級較低。遞補單照常復盤，維持樣本累積讓停用策略有機會翻身；
+    但遞補檔數受 fallback_max 上限（實證 2026-07：整單全遞補的日子明顯負期望——
+    汰弱留強說「別交易」時就少交易，名單短是誠實訊號、不硬湊滿）。"""
     picks, bench = [], []
     discount = cfg["fees"]["default_discount"]
     min_trig = cfg.get("min_strategies_triggered", 2)
@@ -338,7 +340,8 @@ def screen(market, cfg, weights, price_shifts=None, side="long", allow_fallback=
     picks = picks[:max_picks]
     if allow_fallback and len(picks) < max_picks and bench:
         bench.sort(key=lambda x: (-x[0], -x[1], -x[2], -x[3]["amp_avg"]))
-        for _, _, _, p in bench[: max_picks - len(picks)]:
+        n_fb = min(cfg.get("fallback_max", max_picks), max_picks - len(picks))
+        for _, _, _, p in bench[:n_fb]:
             p["fallback"] = True
             picks.append(p)
     return picks

@@ -53,6 +53,7 @@ def compute_weights(stats, opt_cfg, prev_doc=None):
     weights, log = {}, []
 
     # 第一輪：依窗口績效判定啟停與權重
+    probation = opt_cfg.get("probation_trades", 0)
     for s in STRATEGIES:
         sid = s["id"]
         st = stats[sid]
@@ -70,6 +71,13 @@ def compute_weights(stats, opt_cfg, prev_doc=None):
                 enabled = True
                 w = 0.5 + (st["win_rate"] - 50) * 0.03 + exp_frac * 40
                 w = max(opt_cfg["weight_min"], min(opt_cfg["weight_max"], round(w, 2)))
+        elif (probation and not is_cand and st["expectancy"] is not None
+              and st["trades"] >= probation
+              and st["expectancy"] / 100 < opt_cfg["disable_expectancy_below"]):
+            # 觀察期速停：樣本未達 min_trades 但已見負期望——先下場（虛擬追蹤持續，
+            # 樣本累積足額後回歸常規汰弱留強判定）。壞證據快停、好證據慢升的不對稱設計。
+            enabled = False
+            w = 0.0
         st["weight"], st["enabled"], st["candidate"], st["floor"] = w, enabled, is_cand, False
         weights[sid] = w
 

@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import twstock
-from indicators import build_market, market_breadth
+from indicators import build_market, market_breadth, market_breadth_ma_series
 from strategies import screen, evaluate, STRATEGIES, default_weight
 from review import run_review
 from optimize import run_optimize
@@ -63,10 +63,30 @@ def regime_state(snapshots, cfg):
     """大盤環境：市場寬度均值 ≥ 門檻為多方、< 門檻為空方。
     enabled 時據此決定「主方向」：多方環境以做多為主、空方環境以做空為主
     （walk-forward 實證：空方環境做多平均負期望值——主力不做多、改做空）。
+    hysteresis > 0 時啟用遲滯帶抗抖動：翻多需 ≥ 門檻+帶寬、翻空需 < 門檻−帶寬，
+    帶內維持前一狀態；以寬度序列無狀態重放推得當前狀態（walk-forward 安全）。
     book：當日主方向 long/short（逆勢配額另由 screen_book 處理）。"""
     rcfg = cfg.get("regime_filter") or {}
-    b, bma = market_breadth(snapshots, rcfg.get("breadth_ma", 5))
-    bull = (bma is None) or (bma >= rcfg.get("min_breadth", 0.5))
+    ma = rcfg.get("breadth_ma", 5)
+    thr = rcfg.get("min_breadth", 0.5)
+    hys = rcfg.get("hysteresis", 0) or 0
+    b, bma = market_breadth(snapshots, ma)
+    if bma is None:
+        bull = True
+    elif hys > 0:
+        # 只取「完整 ma 窗口」的均值序列重放（暖身期樣本少、噪音大，不參與翻轉判定）
+        series = market_breadth_ma_series(snapshots, ma)[max(0, ma - 1):]
+        if not series:
+            bull = bma >= thr
+        else:
+            bull = True                 # 起始視為多方（與無資料預設一致）
+            for v in series:
+                if bull and v < thr - hys:
+                    bull = False
+                elif not bull and v >= thr + hys:
+                    bull = True
+    else:
+        bull = bma >= thr
     book = "long" if (bull or not rcfg.get("enabled")) else "short"
     return {"breadth": round(b, 3) if b is not None else None,
             "breadth_ma": round(bma, 3) if bma is not None else None,
