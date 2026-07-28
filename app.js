@@ -147,13 +147,18 @@ function stockCard(p, rank) {
 
 /* ---------- Tab 1 今日選股 ---------- */
 const shiftTxt = (v) => (v > 0 ? `+${v}` : `${v}`) + "R";
+// 時間停損 bar index → 時刻（bar 0 = 09:00 開盤後第一根 5 分K；24=11:00、30=11:30、36=12:00）
+const tstopTime = (bar) => {
+  const mins = 9 * 60 + bar * 5;
+  return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+};
 function renderPicks() {
   const d = DB.picks;
   const n = d.picks?.length || 0;
   const sh = d.price_shifts || {};
   const shifted = ["entry", "target", "stop"].some((k) => sh[k]);
   const exitMode = (sh.trail || sh.tstop != null)
-    ? `、出場引擎：移動停利 ${sh.trail ? sh.trail + "R" : "關"}／時間停損 ${sh.tstop != null ? "12:00" : "關"}（A/B 實證擇優）` : "";
+    ? `、出場引擎：移動停利 ${sh.trail ? sh.trail + "R" : "關"}／時間停損 ${sh.tstop != null ? tstopTime(sh.tstop) : "關"}（A/B 實證擇優）` : "";
   const rk = riskParams();
   const rg = d.regime || DB.market?.breadth || null;
   const book = d.regime?.book || (d.picks?.[0]?.side) || "long";   // 今日建議單方向
@@ -509,11 +514,11 @@ function renderPriceModel() {
   const s = pm.stats, sh = pm.shifts || {};
   $("#priceModelCard").hidden = false;
   $("#priceModelInfo").innerHTML =
-    `進出場建議價＝CDP 基準價＋偏移 ×「訊號日振幅 R」，偏移與<b>出場引擎</b>（地板式移動停利、12:00 時間停損）
+    `進出場建議價＝CDP 基準價＋偏移 ×「訊號日振幅 R」，偏移與<b>出場引擎</b>（地板式移動停利、多時點時間停損）
      每日依最近 <b>${pm.window_days}</b> 個復盤日重放 A/B 實證、績效明顯改善才切換（防止雜訊抖動）。
      目前：進場 <b>${shiftTxt(sh.entry ?? 0)}</b> · 停利 <b>${shiftTxt(sh.target ?? 0)}</b> ·
      停損 <b>${shiftTxt(sh.stop ?? 0)}</b> · 移動停利 <b>${sh.trail ? sh.trail + "R" : "關"}</b> ·
-     時間停損 <b>${sh.tstop != null ? "12:00" : "關"}</b>
+     時間停損 <b>${sh.tstop != null ? tstopTime(sh.tstop) : "關"}</b>
      ${s.net != null && s.net_baseline != null ? `｜窗口淨損益 <b>${fmt(s.net)}</b> vs 原始 CDP <b>${fmt(s.net_baseline)}</b> 元` : ""}`;
   const frCls = s.fill_target == null ? "" : (s.fill_rate ?? 0) >= s.fill_target ? "up" : "down";
   const tRate = (s.target_rate ?? 0) + (s.trail_rate ?? 0);
@@ -531,7 +536,7 @@ function renderPriceModel() {
     const sfrCls = ss.fill_target == null ? "" : (ss.fill_rate ?? 0) >= ss.fill_target ? "up" : "down";
     $("#priceModelInfo").innerHTML += `<br>🔻 <b>空方（獨立迭代）</b>：放空 NH−<b>${shS.entry ?? 0}R</b> ·
       回補 NL−<b>${shS.target ?? 0}R</b> · 停損 AH−<b>${shS.stop ?? 0}R</b> · 移動停利 <b>${shS.trail ? shS.trail + "R" : "關"}</b> ·
-      時間停損 <b>${shS.tstop != null ? "12:00" : "關"}</b>
+      時間停損 <b>${shS.tstop != null ? tstopTime(shS.tstop) : "關"}</b>
       ｜窗口：成交率 <b class="${sfrCls}">${ss.fill_rate ?? "–"}%</b> · 賺賠比 <b>${ss.payoff ?? "–"}</b> ·
       淨損益 <b>${fmt(ss.net)}</b> vs 原始 CDP <b>${fmt(ss.net_baseline)}</b> 元`;
   }
