@@ -98,5 +98,10 @@
     "min_breadth": 0.5,
     "counter_quota": 2,
     "counter_min_hits": 3
+  },
+  "overnight": {
+    "enabled": true,
+    "flip_up": 1.0,
+    "flip_down": -1.0
   }
 }

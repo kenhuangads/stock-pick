@@ -11,6 +11,10 @@ on:
     - cron: '20 14 * * 1-5'   # 22:20 台北
     - cron: '10 15 * * 1-5'   # 23:10 台北
     - cron: '10 16 * * 1-5'   # 00:10 台北（隔日；往回探仍抓當日交易資料）
+    # 清晨校正（--dawn）：美股收盤（台北夏令 04:00／冬令 05:00）後抓隔夜訊號重判環境，
+    # 方向被翻轉時重出當日建議單（例：2026-07-31 前夜費半 +8.19% 而寬度判空）。兩發兜底。
+    - cron: '10 21 * * 0-4'   # 05:10 台北（週一～五）
+    - cron: '40 21 * * 0-4'   # 05:40 台北（兜底）
   workflow_dispatch:
     inputs:
       force:
@@ -36,8 +40,13 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: 抓行情 → 復盤 → 迭代優化 → 智能選股
-        run: python scripts/daily_update.py ${{ inputs.force && '--force' || '' }}
+      - name: 抓行情 → 復盤 → 迭代優化 → 智能選股（20 UTC 後為清晨隔夜校正）
+        run: |
+          if [ "$(date -u +%H)" -ge 20 ]; then
+            python scripts/daily_update.py --dawn
+          else
+            python scripts/daily_update.py ${{ inputs.force && '--force' || '' }}
+          fi
       - name: 復盤紀錄審計（逐筆重放核實，未通過不得 commit）
         run: python scripts/verify_reviews.py
       - name: Commit 資料更新（push 後 Pages 自動建置）

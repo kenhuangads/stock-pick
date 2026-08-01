@@ -27,6 +27,7 @@ from review import run_review
 from optimize import run_optimize
 from price_opt import run_price_opt
 from intraday import ensure_intraday, load_intraday
+from overnight import load_overnight, overnight_for, update_overnight
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -59,13 +60,18 @@ def weights_from_doc(doc):
     return weights
 
 
-def regime_state(snapshots, cfg):
+def regime_state(snapshots, cfg, overnight_row=None):
     """大盤環境：市場寬度均值 ≥ 門檻為多方、< 門檻為空方。
     enabled 時據此決定「主方向」：多方環境以做多為主、空方環境以做空為主
     （walk-forward 實證：空方環境做多平均負期望值——主力不做多、改做空）。
     hysteresis > 0 時啟用遲滯帶抗抖動：翻多需 ≥ 門檻+帶寬、翻空需 < 門檻−帶寬，
     帶內維持前一狀態；以寬度序列無狀態重放推得當前狀態（walk-forward 安全）。
-    book：當日主方向 long/short（逆勢配額另由 screen_book 處理）。"""
+    book：當日主方向 long/short（逆勢配額另由 screen_book 處理）。
+
+    overnight_row（清晨校正）：美股收盤的隔夜訊號 {sox,gspc,ixic,w}。台股寬度只看得到
+    「昨天以前」，看不到隔夜的美股整場——2026-07-31 台股創最大漲點前夜費半 +8.19%，
+    寬度卻判空方出了 8 檔空單（實測案例）。隔夜加權訊號與台股當日寬度相關 0.40：
+    訊號突破門檻且與寬度判定相反時，以隔夜訊號覆蓋（flip）。"""
     rcfg = cfg.get("regime_filter") or {}
     ma = rcfg.get("breadth_ma", 5)
     thr = rcfg.get("min_breadth", 0.5)
@@ -87,10 +93,23 @@ def regime_state(snapshots, cfg):
                     bull = True
     else:
         bull = bma >= thr
+
+    # 隔夜訊號覆蓋：只在「與寬度判定相反」時翻轉（同向無需動作）
+    on_cfg = cfg.get("overnight") or {}
+    on_flip = None
+    if on_cfg.get("enabled") and overnight_row and overnight_row.get("w") is not None:
+        w = overnight_row["w"]
+        fu, fd = on_cfg.get("flip_up"), on_cfg.get("flip_down")
+        if fu is not None and w >= fu and not bull:
+            bull, on_flip = True, "bull"
+        elif fd is not None and w <= fd and bull:
+            bull, on_flip = False, "bear"
+
     book = "long" if (bull or not rcfg.get("enabled")) else "short"
     return {"breadth": round(b, 3) if b is not None else None,
             "breadth_ma": round(bma, 3) if bma is not None else None,
-            "bull": bull, "enabled": bool(rcfg.get("enabled")), "book": book}
+            "bull": bull, "enabled": bool(rcfg.get("enabled")), "book": book,
+            "overnight": overnight_row, "overnight_flip": on_flip}
 
 
 def screen_book(market, cfg, weights, shifts, regime):
@@ -117,12 +136,13 @@ def screen_book(market, cfg, weights, shifts, regime):
     return main_picks + counter_picks
 
 
-def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc):
-    """由（時間排序的）快照序列產生 market/picks/strategies/price_model 輸出。"""
+def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc, overnight_row=None):
+    """由（時間排序的）快照序列產生 market/picks/strategies/price_model 輸出。
+    overnight_row：清晨校正跑（--dawn）時傳入剛收盤的美股隔夜訊號；晚間初版為 None。"""
     latest_date, market = build_market(snapshots)
     weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
     shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
-    regime = regime_state(snapshots, cfg)
+    regime = regime_state(snapshots, cfg, overnight_row)
     picks = screen_book(market, cfg, weights, shifts, regime)
     for m in market.values():  # 供前端自訂選股使用的個股觸發標記（多空皆計）
         sl, hl = evaluate(m, weights, "long")
@@ -187,15 +207,18 @@ def rebuild_walkforward(cfg, allow_fetch=True):
     reviews, strat_doc, price_doc = [], None, None
     # Yahoo 5 分K只回溯約 60 天：更早的日期抓了必空，直接跳過抓取（避免整輪失敗重試拖慢 rebuild）
     intraday_cutoff = (date.today() - timedelta(days=55)).isoformat()
+    on_doc = load_overnight() if (cfg.get("overnight") or {}).get("enabled") else {}
     for i in range(min_days, len(snaps)):
         upto = snaps[: i]                      # 只看 i-1 為止的資料
         latest_date, market = build_market(upto)
         weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
         shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
-        regime = regime_state(upto, cfg)       # 環境閘門同樣只看歷史（walk-forward 誠實）
+        trade_date = snaps[i]["date"]
+        # 隔夜訊號＝美東 trade_date-1 收盤（台灣 trade_date 清晨可得）→ 模擬「清晨校正」視角
+        on_row = overnight_for(trade_date, on_doc) if on_doc else None
+        regime = regime_state(upto, cfg, on_row)   # 環境閘門同樣只看歷史（walk-forward 誠實）
         picks = screen_book(market, cfg, weights, shifts, regime)
         picks_doc = {"generated_on": latest_date, "picks": picks}
-        trade_date = snaps[i]["date"]
         bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff
                 else load_intraday(trade_date))
         entry = run_review(picks_doc, snaps[i], cfg, bars)   # 用第 i 天實際行情驗證
@@ -215,11 +238,47 @@ def prune_history(keep):
         print(f"[prune] 移除過舊快照 {p.name}")
 
 
+def dawn_correction(cfg):
+    """清晨校正（台北 ~05:10，美股剛收盤）：抓隔夜訊號 → 重判環境 → 重出當日建議單。
+
+    晚間初版只看得到台股寬度；清晨此刻補上美股整場的資訊（費半/S&P/NASDAQ 已消化
+    Fed、財報、地緣等全部隔夜事件）。方向被翻轉時（如 2026-07-31 前夜費半 +8.19%
+    而寬度判空）重選股救回整天；未翻轉時也更新 regime 附帶的隔夜數值供前端徽章顯示。"""
+    today = datetime.now(TAIPEI).date()
+    if today.weekday() >= 5:
+        print("[dawn] 週末休市，跳過")
+        return
+    update_overnight((today - timedelta(days=10)).isoformat(), today.isoformat())
+    on_row = overnight_for(today.isoformat())
+    if not on_row:
+        print("[dawn] 無隔夜資料（美股假日或抓取失敗），維持晚間版")
+        return
+    prev = load_json(LATEST / "picks.json", None)
+    snaps = twstock.load_snapshots()
+    reviews = load_json(DATA / "reviews.json", [])
+    strat_doc = load_json(LATEST / "strategies.json", None)
+    price_doc = load_json(LATEST / "price_model.json", None)
+    market_doc, picks_doc, strat_doc, price_doc = generate_outputs(
+        snaps, cfg, reviews, strat_doc, price_doc, overnight_row=on_row)
+    old_book = ((prev or {}).get("regime") or {}).get("book")
+    new_book = picks_doc["regime"]["book"]
+    picks_doc["dawn_corrected"] = bool(picks_doc["regime"].get("overnight_flip"))
+    save_json(LATEST / "picks.json", picks_doc)
+    save_json(LATEST / "market.json", market_doc)
+    flip = picks_doc["regime"].get("overnight_flip")
+    print(f"[dawn] 隔夜加權 {on_row.get('w'):+}%（費半 {on_row.get('sox'):+}%）→ "
+          f"{'⚡ 環境翻轉 ' + str(old_book) + '→' + str(new_book) + '，已重出建議單' if flip else f'方向維持 {new_book}，僅更新隔夜資訊'}")
+
+
 def main():
     args = set(sys.argv[1:])
     cfg = load_config()
     LATEST.mkdir(parents=True, exist_ok=True)
     new_data = False
+
+    if "--dawn" in args:
+        dawn_correction(cfg)
+        return
 
     if "--rebuild" not in args and "--offline" not in args:
         snap = twstock.build_latest_snapshot()

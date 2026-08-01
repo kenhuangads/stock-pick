@@ -179,17 +179,23 @@ function renderPicks() {
   // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方主做多、<0.5 空方主做空
   const regimeChip = rg && rg.breadth_ma != null
     ? `<span class="badge ${rg.bull ? "on" : "off"}" title="市場寬度＝全市場上漲家數比的 5 日均；≥50% 多方環境以做多為主、<50% 空方環境以做空為主，另保留少量更嚴門檻的逆勢配額">${rg.bull ? "🌤 多方環境 → 做多為主" : "⛈ 空方環境 → 做空為主"}｜寬度5MA ${(rg.breadth_ma * 100).toFixed(0)}%</span> ` : "";
+  // 隔夜訊號徽章（清晨校正）：美股收盤加權（費半50%+S&P30%+NASDAQ20%），突破門檻且與寬度相反時翻轉環境
+  const on = rg?.overnight;
+  const onChip = on && on.w != null
+    ? `<span class="badge ${rg.overnight_flip ? "flip" : "cand"}" title="隔夜訊號＝美股收盤加權（費半 ${on.sox ?? "–"}%／S&P ${on.gspc ?? "–"}%／NASDAQ ${on.ixic ?? "–"}%）；美股價格已消化 Fed、財報、地緣等隔夜消息，與台股當日寬度相關 0.40。清晨 05:10 排程抓取後自動校正環境判定">🌙 隔夜 ${on.w > 0 ? "+" : ""}${on.w}%${rg.overnight_flip ? `｜⚡ 清晨校正：隔夜訊號翻轉環境 → ${rg.book === "long" ? "改做多" : "改做空"}` : ""}</span> ` : "";
   const mixTxt = n
     ? `本日名單：${nLong ? `🔺做多 <b>${nLong}</b> 檔` : ""}${nLong && nShort ? "＋" : ""}${nShort ? `🔻做空 <b class="down">${nShort}</b> 檔（現股當沖先賣後買）` : ""}${nCt
         ? `，其中 <b>${nCt}</b> 檔為<b>逆勢配額</b>（與大盤環境反向、門檻更嚴，實驗性質信心自酌）` : ""}` : "";
   const shS = sh.short || {};
   const priceLine = (shifted || exitMode || nShort)
     ? `<br>📐 價格模型（多空各自迭代）：${nLong ? `做多 進${shiftTxt(sh.entry ?? 0)}/停利${shiftTxt(sh.target ?? 0)}/停損${shiftTxt(sh.stop ?? 0)}` : ""}${nLong && nShort ? "；" : ""}${nShort ? `做空 進−${shS.entry ?? 0}R/回補−${shS.target ?? 0}R/停損−${shS.stop ?? 0}R` : ""}${exitMode}` : "";
+  const dawnNote = d.dawn_corrected
+    ? `<br>⚡ <b>清晨校正版</b>：美股收盤後隔夜訊號與台股寬度判定相反，環境已翻轉、建議單已依新方向重出（晚間初版作廢）。` : "";
   $("#picksInfo").innerHTML = n
-    ? `${regimeChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
-        ? `（含遞補 ${nFb} 檔，訊號較弱）` : ""}${mixTxt ? `<br>${mixTxt}` : ""}
+    ? `${regimeChip}${onChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
+        ? `（含遞補 ${nFb} 檔，訊號較弱）` : ""}${dawnNote}${mixTxt ? `<br>${mixTxt}` : ""}
        <br>已排除處置股／注意股／非當沖標的／不可放空者（做空單）／1張風險超日限者／流動性與波動不足者。${priceLine}${riskSummary}`
-    : `${regimeChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`;
+    : `${regimeChip}${onChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`;
   $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
 
