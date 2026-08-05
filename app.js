@@ -486,17 +486,33 @@ function renderReview() {
     const reasonTxt = { target: "停利", trail: "移動停利", stop: "停損", timeout: "時間停損", close: "收盤沖銷", nofill: "未成交" };
     const rows = d.rows.map((p) => {
       const sm = p.side === "short" ? '<span class="down" title="做空">🔻</span> ' : "";
-      const noFillTxt = p.side === "short" ? `未成交（最高 ${fmt2(p.day_high)} 未觸賣價）` : `未成交（最低 ${fmt2(p.day_low)} 未觸價）`;
-      if (!p.filled) return `<tr class="dim"><td>${sm}${p.code} ${p.name}</td><td>${fmt2(p.entry)}</td>
+      // 當時建議的完整價位（做空鏡像：進場為賣價、突破參考為下方 AL 側）
+      const lb = p.side === "short"
+        ? { e: "放空", t: "回補停利", s: "停損", a: "順勢跌破" }
+        : { e: "買進 NL", t: "停利 NH", s: "停損 AL", a: "突破 AH" };
+      const planLine = `<div class="plan muted small">${lb.e} ${fmt2(p.entry)}・${lb.t} ${fmt2(p.target)}・${lb.s} ${fmt2(p.stop)}${p.ah != null ? `・${lb.a} ${fmt2(p.ah)}` : ""}${p.trail_dist ? `・移停 ${fmt2(p.trail_dist)}` : ""}</div>`;
+      const nameCell = `${sm}${p.code} ${p.name}${planLine}`;
+      if (!p.filled) {
+        const reasonHypo = { target: "觸及停利", trail: "移動停利", stop: "觸及停損", timeout: "時間停損", close: "收盤沖銷" };
+        if (p.touch_only) {
+          const hypo = p.hypo_reason
+            ? `；若排到隊：${reasonHypo[p.hypo_reason] || p.hypo_reason} ${signTxt(p.hypo_ret_pct)}${fmt2(p.hypo_ret_pct)}%`
+            : "";
+          return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
+          <td colspan="3">⚠️ 觸價未穿——排隊未必成交（保守記未成交${hypo}）</td><td>–</td></tr>`;
+        }
+        const noFillTxt = p.side === "short" ? `未成交（最高 ${fmt2(p.day_high)} 未觸賣價）` : `未成交（最低 ${fmt2(p.day_low)} 未觸價）`;
+        return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
         <td colspan="3">${noFillTxt}</td><td>–</td></tr>`;
+      }
       const m = p._m || {};
       if (!m.taken) {
         const why = m.reason === "consec" ? "🛑 連虧停手" : "🛑 超出當日風險額度";
-        return `<tr class="dim"><td>${sm}${p.code} ${p.name}</td><td>${fmt2(p.fill_price)}</td>
+        return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.fill_price)}</td>
         <td>${fmt2(p.exit_price)}</td><td colspan="2">${why}</td>
         <td class="muted">(未取 ${signTxt(p._net)}${fmt(p._net)})</td></tr>`;
       }
-      return `<tr><td>${sm}${p.code} ${p.name}</td><td>${fmt2(p.fill_price)}</td>
+      return `<tr><td>${nameCell}</td><td>${fmt2(p.fill_price)}</td>
         <td>${fmt2(p.exit_price)}</td><td>${reasonTxt[p.exit_reason] || p.exit_reason}</td>
         <td>${m.lots} 張</td>
         <td class="${signCls(m.net)}">${signTxt(m.net)}${fmt(m.net)}</td></tr>`;

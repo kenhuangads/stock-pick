@@ -218,6 +218,7 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         "counter": pick.get("counter"), "fallback": pick.get("fallback"),  # 逆勢/遞補標記（績效歸因用）
         "score": pick["score"], "strategies": pick["strategies"],
         "entry": pick["entry"], "target": pick["target"], "stop": pick["stop"],
+        "ah": pick.get("ah"),   # 順勢突破參考價（復盤明細完整呈現當時建議的四個價位）
         "trail_dist": pick.get("trail_dist"), "tstop_bar": pick.get("tstop_bar"),
         "prev_close": pick.get("close"),   # 訊號日收盤＝交易日的「前收」，供停板價/重放使用
         "cdp_base": pick.get("cdp_base"),  # 原始 CDP 價位與當日振幅，供價格模型重放迭代
@@ -237,6 +238,21 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         side=side, limit_up=limit_up_price(pick.get("close")))
     r["sim_mode"], r["exit_reason"] = mode, reason
     if not filled:
+        # 「觸價未穿」誠實標註：價格恰好觸及掛價但未穿越——排隊前段可能成交、
+        # 後段買不到（不確定成交）。保守口徑仍記未成交（防逆選擇灌水），
+        # 但附上「若排到隊」的假想結果供人工判讀（例：8/4 旺宏 109.5 觸最低即飛）。
+        touched = (ohlc["h"] >= pick["entry"]) if side == "short" else (ohlc["l"] <= pick["entry"])
+        if touched and sim_cfg.get("strict_fill"):
+            r["touch_only"] = True
+            h_filled, h_fill, h_exit, h_reason, _ = simulate_trade(
+                pick["entry"], pick["target"], pick["stop"], ohlc, bars,
+                pick.get("trail_dist"), pick.get("tstop_bar"),
+                strict_fill=False, limit_dn=limit_down_price(pick.get("close")),
+                side=side, limit_up=limit_up_price(pick.get("close")))
+            if h_filled:
+                r["hypo_reason"] = h_reason
+                r["hypo_ret_pct"] = round(((h_fill - h_exit) if side == "short" else (h_exit - h_fill))
+                                          / h_fill * 100, 2)
         return r
     r["filled"], r["fill_price"], r["exit_price"] = True, fill, exit_price
 

@@ -234,3 +234,6 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 
 /* 清晨校正徽章：隔夜訊號翻轉環境時的強調樣式 */
 .badge.flip { background: rgba(255,140,60,.18); color: #ffb26b; border: 1px solid rgba(255,140,60,.5); }
+
+/* 復盤明細:當時建議的完整價位（次行小字） */
+.trades .plan { font-size: 11px; margin-top: 2px; white-space: nowrap; opacity: .85; }
