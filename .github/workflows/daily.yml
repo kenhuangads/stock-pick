@@ -26,7 +26,10 @@ permissions:
   contents: write
 
 concurrency:
-  group: daily-update
+  # 晚間初版與清晨校正分屬不同群組：GitHub 每個群組只容一個排隊者，
+  # 共用群組時延遲數小時的晚間發次會把清晨校正擠掉（該次校正就永遠不會發生）。
+  # 20 UTC 起＝清晨校正時段，與晚間互不取消。
+  group: daily-update-${{ contains(github.event.schedule, '21 * * 0-4') && 'dawn' || 'evening' }}
   cancel-in-progress: false
 
 # Pages 採 branch 部署（main 根目錄）：資料 commit push 後 GitHub 自動建置，
@@ -40,9 +43,14 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: 抓行情 → 復盤 → 迭代優化 → 智能選股（20 UTC 後為清晨隔夜校正）
+      - name: 抓行情 → 復盤 → 迭代優化 → 智能選股（清晨發次為隔夜校正）
+        # 以「觸發的 cron 身分」判斷模式，不看執行當下的時鐘：GitHub 排程常延遲數小時，
+        # 舊版用 `date -u +%H >= 20` 判斷，延遲跨過 00 UTC 就會誤判成晚間流程、
+        # 清晨校正靜默不執行（2026-08-07 實例：21:10 UTC 的發次拖到 01:01 UTC 才跑）。
+        env:
+          IS_DAWN: ${{ contains(github.event.schedule, '21 * * 0-4') }}
         run: |
-          if [ "$(date -u +%H)" -ge 20 ]; then
+          if [ "$IS_DAWN" = "true" ]; then
             python scripts/daily_update.py --dawn
           else
             python scripts/daily_update.py ${{ inputs.force && '--force' || '' }}

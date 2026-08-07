@@ -262,12 +262,18 @@ def dawn_correction(cfg):
         snaps, cfg, reviews, strat_doc, price_doc, overnight_row=on_row)
     old_book = ((prev or {}).get("regime") or {}).get("book")
     new_book = picks_doc["regime"]["book"]
+    now = datetime.now(TAIPEI)
     picks_doc["dawn_corrected"] = bool(picks_doc["regime"].get("overnight_flip"))
+    # 校正時刻：排程可能被 GitHub 延遲數小時，開盤（09:00）後才到的校正要讓使用者看得見，
+    # 才不會拿盤中才變動的方向去回推早上的決策。
+    picks_doc["dawn_at"] = now.isoformat(timespec="minutes")
+    picks_doc["dawn_late"] = now.hour >= 9
     save_json(LATEST / "picks.json", picks_doc)
     save_json(LATEST / "market.json", market_doc)
     flip = picks_doc["regime"].get("overnight_flip")
-    print(f"[dawn] 隔夜加權 {on_row.get('w'):+}%（費半 {on_row.get('sox'):+}%）→ "
-          f"{'⚡ 環境翻轉 ' + str(old_book) + '→' + str(new_book) + '，已重出建議單' if flip else f'方向維持 {new_book}，僅更新隔夜資訊'}")
+    late = "（⚠️ 已開盤後才校正）" if picks_doc["dawn_late"] else ""
+    print(f"[dawn] {now:%H:%M} 隔夜加權 {on_row.get('w'):+}%（費半 {on_row.get('sox'):+}%）→ "
+          f"{'⚡ 環境翻轉 ' + str(old_book) + '→' + str(new_book) + '，已重出建議單' if flip else f'方向維持 {new_book}，僅更新隔夜資訊'}{late}")
 
 
 def main():
@@ -319,7 +325,19 @@ def main():
             print("[skip] 無新交易日資料與新復盤（休市或已更新過），不重寫輸出")
             return
 
-    market_doc, picks_doc, strat_doc, price_doc = generate_outputs(snaps, cfg, reviews, strat_doc, price_doc)
+    # 若「訊號日當晚的美股」已收盤（清晨校正已抓過），重新產生輸出時要沿用該隔夜訊號，
+    # 否則盤中重跑（rebuild／手動）會把當日清晨校正的方向靜默改回未校正版。
+    # 精確比對訊號日 key（不用 overnight_for 的回溯查找）：晚間跑產生的是「隔天」建議，
+    # 隔天的隔夜訊號尚未發生，回溯查找會誤用前一天的過期訊號。
+    on_row = None
+    if (cfg.get("overnight") or {}).get("enabled"):
+        on_row = load_overnight().get(snaps[-1]["date"])
+        if on_row:
+            print(f"[fetch] 沿用 {snaps[-1]['date']} 已知隔夜訊號 {on_row.get('w'):+}%（保留清晨校正）")
+    market_doc, picks_doc, strat_doc, price_doc = generate_outputs(
+        snaps, cfg, reviews, strat_doc, price_doc, overnight_row=on_row)
+    if on_row:   # 與清晨校正同口徑標記，前端徽章才不會因盤中重跑而消失
+        picks_doc["dawn_corrected"] = bool(picks_doc["regime"].get("overnight_flip"))
 
     save_json(DATA / "reviews.json", reviews)
     save_json(LATEST / "market.json", market_doc)
