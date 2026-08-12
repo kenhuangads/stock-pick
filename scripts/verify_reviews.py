@@ -38,11 +38,12 @@ def audit():
                 bars = None
 
             side = p.get("side", "long")
+            emode = p.get("entry_mode", "revert")
             filled, fill, exitp, reason, mode = simulate_trade(
                 p["entry"], p["target"], p["stop"], ohlc, bars,
                 p.get("trail_dist"), p.get("tstop_bar"),
                 strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
-                side=side, limit_up=limit_up_price(p.get("prev_close")))
+                side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode)
             if (filled, fill, exitp, reason, mode) != (
                     p["filled"], p["fill_price"], p["exit_price"], p["exit_reason"], p["sim_mode"]):
                 issues.append(f"{date} {p['code']} 重放不一致："
@@ -53,7 +54,12 @@ def audit():
                 continue
             n_intraday += 1
             def fillable(b):
-                # 與模擬引擎同口徑；做空鏡像＝開盤 ≥ 掛賣價必成，否則需（穿）漲觸掛價
+                # 與模擬引擎同口徑；做空鏡像＝開盤 ≥ 掛賣價必成，否則需（穿）漲觸掛價。
+                # 突破追價=穿越觸發（多：漲穿；空：跌穿），觸發即成交（滑價另計）
+                if emode == "breakout":
+                    if side == "short":
+                        return b[0] <= p["entry"] or b[2] <= p["entry"]
+                    return b[0] >= p["entry"] or b[1] >= p["entry"]
                 if side == "short":
                     return b[0] >= p["entry"] or (b[1] > p["entry"] if strict else b[1] >= p["entry"])
                 return b[0] <= p["entry"] or (b[2] < p["entry"] if strict else b[2] <= p["entry"])
@@ -72,7 +78,13 @@ def audit():
                 if side == "long" and p["fill_price"] > p["stop"] and p["exit_price"] > p["stop"]:
                     issues.append(f"{date} {p['code']} 停損出場價 {p['exit_price']} 高於停損價 {p['stop']}（未跳空卻優於停損）")
             if not p["filled"] and any(fillable(b) for b in bars):
-                issues.append(f"{date} {p['code']} 未成交但 5分K 顯示曾觸價")
+                gave_up = False
+                if emode == "breakout":
+                    # 突破單合法的「觸發但未進場」：觸發根開盤已越過停利價 → 引擎不追（放棄）
+                    fb = next(b for b in bars if fillable(b))
+                    gave_up = (fb[0] <= p["target"]) if side == "short" else (fb[0] >= p["target"])
+                if not gave_up:
+                    issues.append(f"{date} {p['code']} 未成交但 5分K 顯示曾觸價")
 
     print(f"[verify] 掃描 {len(reviews)} 天、{checked} 筆（intraday {n_intraday} 筆）")
     if issues:

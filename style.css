@@ -183,6 +183,10 @@ input[type="number"], select {
 .badge.lside { background: rgba(255,93,82,.13); color: #ff8a80; border: 1px solid rgba(255,93,82,.4); }
 .badge.sside { background: rgba(46,204,113,.13); color: #58d68d; border: 1px solid rgba(46,204,113,.4); }
 .badge.ct { background: rgba(245,192,78,.12); color: var(--gold); border: 1px dashed rgba(245,192,78,.5); }
+.badge.bo { background: rgba(186,104,255,.14); color: #d0a3ff; border: 1px solid rgba(186,104,255,.45); }
+.health { margin: .25rem 0 .55rem; padding: .5rem .65rem; border-radius: 8px; font-size: .85rem; line-height: 1.45; }
+.health.cold { background: rgba(77,163,255,.09); border: 1px solid rgba(77,163,255,.4); }
+.health.warm { background: rgba(46,204,113,.06); border: 1px solid rgba(46,204,113,.25); }
 .badge.cand { background: rgba(120,144,255,.13); color: #9db3ff; border: 1px solid rgba(120,144,255,.4); }
 .s-desc { font-size: 12px; color: var(--muted); margin: 6px 0 8px; line-height: 1.55; }
 .bar { height: 7px; background: #0f1319; border-radius: 99px; overflow: hidden; }

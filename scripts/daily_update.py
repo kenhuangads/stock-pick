@@ -116,13 +116,19 @@ def screen_book(market, cfg, weights, shifts, regime):
     """組當日建議單：主方向（順大盤環境）為主，保留少量「逆勢配額」給另一方向——
     當沖多空皆有機會，環境判定也可能錯；逆勢單門檻更嚴（counter_min_hits）、
     無遞補、數量受 counter_quota 限制，並標記 counter=True 供前端明示與後續實證。
-    總檔數維持 max_picks：主方向 = max_picks − 實際逆勢檔數。"""
+    總檔數維持 max_picks：主方向 = max_picks − 實際逆勢檔數。
+    counter_sides（選配）：限制逆勢配額只開放給指定方向——94 日同路徑歸因：
+    逆勢多（空頭環境買強勢）+18,354、逆勢空（多頭環境空弱勢）6 月起連三月失血
+    （台股結構性偏多、軋空頻繁，多頭環境空弱勢＝接刀），故預設只留 ["long"]。"""
     rcfg = cfg.get("regime_filter") or {}
     main = regime["book"]
     counter = "short" if main == "long" else "long"
     max_picks = cfg.get("max_picks", 8)
     counter_picks = []
     quota = int(rcfg.get("counter_quota", 0) or 0)
+    allowed = rcfg.get("counter_sides")   # None/缺省＝雙向皆可
+    if allowed and counter not in allowed:
+        quota = 0
     if regime["enabled"] and quota > 0:
         c2 = dict(cfg)
         c2["max_picks"] = quota

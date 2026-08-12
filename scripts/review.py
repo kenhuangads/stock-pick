@@ -31,7 +31,7 @@
 """
 
 
-from indicators import round_tick
+from indicators import round_tick, tick_size
 
 
 def limit_down_price(prev_close):
@@ -67,10 +67,15 @@ def bars_match_ohlc(bars, ohlc, tol=0.005, min_bars=40):
 
 
 def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
-                    strict_fill=False, limit_up=None):
+                    strict_fill=False, limit_up=None, entry_mode="revert"):
     """做空模擬（做多邏輯的鏡像）：放空掛 entry（高、逆勢賣出區），
     回補停利 target（低）、停損 stop（高）。價格上漲＝虧損方向。
-    移動停利：觸及回補價後追蹤「谷底＋trail」，讓下跌的尾巴多跑；原回補價為天花板。"""
+    移動停利：觸及回補價後追蹤「谷底＋trail」，讓下跌的尾巴多跑；原回補價為天花板。
+    entry_mode="breakout"：跌破追空（停損賣單）——價格「跌穿」entry 觸發放空；
+    跳空開低以開盤價成交（開盤已低於停利價則不追、視為放棄）；
+    strict_fill 於停損單語意＝滑價：急殺觸發以觸發價−1 tick 成交（保守）。"""
+    breakout = entry_mode == "breakout"
+
     def stop_px(px, bh):
         # 停損回補價修正：觸及漲停的根，市價買回最差以漲停價成交（不可能更便宜）
         if limit_up is not None and bh >= limit_up:
@@ -82,7 +87,16 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
         armed, trough = False, None   # 觸及回補價後啟動移動停利追蹤
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
-                if bo >= entry:
+                if breakout:
+                    if bo <= entry:
+                        if bo <= target:
+                            return False, None, None, "nofill", "intraday"  # 開盤已跌過停利價：不追
+                        fill = bo           # 跳空開低穿越觸發 → 以開盤價追空
+                    elif bl <= entry:
+                        fill = entry - tick_size(entry) if strict_fill else entry
+                    else:
+                        continue
+                elif bo >= entry:
                     fill = bo               # 開盤即高於掛賣價 → 以開盤價成交（更好的放空價）
                 elif (bh > entry) if strict_fill else (bh >= entry):
                     fill = entry            # 盤中漲（穿）觸掛賣價成交
@@ -118,7 +132,16 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
         return True, fill, ohlc["c"], "close", "intraday"
 
     # fallback：日K保守規則
-    if ohlc["o"] >= entry:
+    if breakout:
+        if ohlc["o"] <= entry:
+            if ohlc["o"] <= target:
+                return False, None, None, "nofill", "daily"
+            fill = ohlc["o"]
+        elif ohlc["l"] <= entry:
+            fill = entry - tick_size(entry) if strict_fill else entry
+        else:
+            return False, None, None, "nofill", "daily"
+    elif ohlc["o"] >= entry:
         fill = ohlc["o"]
     elif (ohlc["h"] > entry) if strict_fill else (ohlc["h"] >= entry):
         fill = entry
@@ -134,7 +157,8 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
 
 
 def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
-                   strict_fill=False, limit_dn=None, side="long", limit_up=None):
+                   strict_fill=False, limit_dn=None, side="long", limit_up=None,
+                   entry_mode="revert"):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
     side="short" 走完全鏡像的做空邏輯（放空掛高、回補在低、停損在高、漲停穿越修正）。
@@ -142,10 +166,14 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
     trail_dist: 地板式移動停利距離（絕對價差，None/0=關）；tstop_bar: 時間停損 bar index（None=關）。
     strict_fill: 穿價成交——限價買單需「跌破掛價」（做空為「漲穿掛賣價」）才算成交；恰好觸價視為排隊成交不到。
     limit_dn/limit_up: 當日跌停/漲停價——停損觸發根若已觸及，市價單最差以停板價成交（修正尾部風險低估）。
+    entry_mode="breakout"：突破追價（停損單語意）——做多「漲穿」entry 觸發追買、做空「跌穿」觸發追空；
+    跳空開越以開盤價成交（開盤已越過停利價則不追）；strict_fill 於此語意＝滑價 1 tick（保守）。
     出場理由：target 停利｜trail 移動停利｜stop 停損｜timeout 時間停損｜close 收盤沖銷｜nofill 未成交。"""
     if side == "short":
         return _simulate_short(entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
-                               strict_fill, limit_up)
+                               strict_fill, limit_up, entry_mode)
+    breakout = entry_mode == "breakout"
+
     def stop_px(px, bl):
         # 停損出場價修正：觸及跌停的根，最差以跌停價成交
         if limit_dn is not None and bl <= limit_dn:
@@ -157,7 +185,16 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
         armed, peak = False, None   # 觸及停利價後啟動移動停利追蹤
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
-                if bo <= entry:
+                if breakout:
+                    if bo >= entry:
+                        if bo >= target:
+                            return False, None, None, "nofill", "intraday"  # 開盤已漲過停利價：不追
+                        fill = bo           # 跳空開高穿越觸發 → 以開盤價追買
+                    elif bh >= entry:
+                        fill = entry + tick_size(entry) if strict_fill else entry
+                    else:
+                        continue
+                elif bo <= entry:
                     fill = bo               # 開盤即低於掛價 → 以開盤價成交（必成）
                 elif (bl < entry) if strict_fill else (bl <= entry):
                     fill = entry            # 盤中（穿）觸掛價成交
@@ -195,7 +232,16 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
         return True, fill, ohlc["c"], "close", "intraday"
 
     # fallback：日K保守規則（順序未知，悲觀假設；無法模擬移動停利/時間停損）
-    if ohlc["o"] <= entry:
+    if breakout:
+        if ohlc["o"] >= entry:
+            if ohlc["o"] >= target:
+                return False, None, None, "nofill", "daily"
+            fill = ohlc["o"]
+        elif ohlc["h"] >= entry:
+            fill = entry + tick_size(entry) if strict_fill else entry
+        else:
+            return False, None, None, "nofill", "daily"
+    elif ohlc["o"] <= entry:
         fill = ohlc["o"]
     elif (ohlc["l"] < entry) if strict_fill else (ohlc["l"] <= entry):
         fill = entry
@@ -218,6 +264,7 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         "counter": pick.get("counter"), "fallback": pick.get("fallback"),  # 逆勢/遞補標記（績效歸因用）
         "score": pick["score"], "strategies": pick["strategies"],
         "entry": pick["entry"], "target": pick["target"], "stop": pick["stop"],
+        "entry_mode": pick.get("entry_mode", "revert"),  # revert=逆勢掛單｜breakout=突破追價
         "ah": pick.get("ah"),   # 順勢突破參考價（復盤明細完整呈現當時建議的四個價位）
         "trail_dist": pick.get("trail_dist"), "tstop_bar": pick.get("tstop_bar"),
         "prev_close": pick.get("close"),   # 訊號日收盤＝交易日的「前收」，供停板價/重放使用
@@ -235,13 +282,16 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         pick.get("trail_dist"), pick.get("tstop_bar"),
         strict_fill=sim_cfg.get("strict_fill", False),
         limit_dn=limit_down_price(pick.get("close")),
-        side=side, limit_up=limit_up_price(pick.get("close")))
+        side=side, limit_up=limit_up_price(pick.get("close")),
+        entry_mode=pick.get("entry_mode", "revert"))
     r["sim_mode"], r["exit_reason"] = mode, reason
     if not filled:
         # 「觸價未穿」誠實標註：價格恰好觸及掛價但未穿越——排隊前段可能成交、
         # 後段買不到（不確定成交）。保守口徑仍記未成交（防逆選擇灌水），
         # 但附上「若排到隊」的假想結果供人工判讀（例：8/4 旺宏 109.5 觸最低即飛）。
-        touched = (ohlc["h"] >= pick["entry"]) if side == "short" else (ohlc["l"] <= pick["entry"])
+        # 突破追價單無排隊問題（觸發即以滑價成交），不適用此標註。
+        touched = (pick.get("entry_mode", "revert") != "breakout" and
+                   ((ohlc["h"] >= pick["entry"]) if side == "short" else (ohlc["l"] <= pick["entry"])))
         if touched and sim_cfg.get("strict_fill"):
             r["touch_only"] = True
             h_filled, h_fill, h_exit, h_reason, _ = simulate_trade(

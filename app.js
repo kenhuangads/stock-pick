@@ -112,21 +112,33 @@ function stockCard(p, rank) {
   const chg = p.chg_pct;
   const short = p.side === "short";
   const sideBadge = `<span class="badge ${short ? "sside" : "lside"}" title="${short ? "做空：放空掛高、回補在低（現股當沖先賣後買）" : "做多：掛低買進、停利在高"}">${short ? "🔻 做空" : "🔺 做多"}</span>`;
+  const bo = p.entry_mode === "breakout";
+  const boBadge = bo ? `<span class="badge bo" title="突破追價單：價格「穿越」觸發價才進場（非掛單等回檔）——請用券商條件單設定觸發價、觸發後市價追入；若跳空開盤已越過停利價則放棄不追">⚡突破</span>` : "";
   const grid = short
-    ? `<div><div class="lb">建議放空 NH</div><div class="v tp">${fmt2(p.entry)}</div></div>
+    ? (bo
+      ? `<div><div class="lb">跌破觸發 追空</div><div class="v tp">${fmt2(p.entry)}</div></div>
+         <div><div class="lb">回補停利</div><div class="v buy">${fmt2(p.target)}</div></div>
+         <div><div class="lb">停損</div><div class="v ah">${fmt2(p.stop)}</div></div>
+         <div><div class="lb">逆勢賣出 NH</div><div class="v sl">${fmt2(p.cdp_base?.nh ?? "")}</div></div>`
+      : `<div><div class="lb">建議放空 NH</div><div class="v tp">${fmt2(p.entry)}</div></div>
        <div><div class="lb">回補停利 NL</div><div class="v buy">${fmt2(p.target)}</div></div>
        <div><div class="lb">停損 AH</div><div class="v ah">${fmt2(p.stop)}</div></div>
-       <div><div class="lb">破底加碼 AL</div><div class="v sl">${fmt2(p.cdp_base?.al ?? p.target)}</div></div>`
-    : `<div><div class="lb">建議買進 NL</div><div class="v buy">${fmt2(p.entry ?? p.cdp?.nl)}</div></div>
+       <div><div class="lb">破底加碼 AL</div><div class="v sl">${fmt2(p.cdp_base?.al ?? p.target)}</div></div>`)
+    : (bo
+      ? `<div><div class="lb">漲穿觸發 追買</div><div class="v buy">${fmt2(p.entry)}</div></div>
+         <div><div class="lb">停利</div><div class="v tp">${fmt2(p.target)}</div></div>
+         <div><div class="lb">停損</div><div class="v sl">${fmt2(p.stop)}</div></div>
+         <div><div class="lb">逆勢買進 NL</div><div class="v ah">${fmt2(p.cdp_base?.nl ?? "")}</div></div>`
+      : `<div><div class="lb">建議買進 NL</div><div class="v buy">${fmt2(p.entry ?? p.cdp?.nl)}</div></div>
        <div><div class="lb">停利 NH</div><div class="v tp">${fmt2(p.target ?? p.cdp?.nh)}</div></div>
        <div><div class="lb">停損 AL</div><div class="v sl">${fmt2(p.stop ?? p.cdp?.al)}</div></div>
-       <div><div class="lb">順勢突破 AH</div><div class="v ah">${fmt2(p.ah ?? p.cdp?.ah)}</div></div>`;
+       <div><div class="lb">順勢突破 AH</div><div class="v ah">${fmt2(p.ah ?? p.cdp?.ah)}</div></div>`);
   return `<div class="card">
     <div class="head">
       ${rank ? `<span class="rank">#${rank}</span>` : ""}
       <span class="code">${p.code}</span><span class="name">${p.name}</span>
       <span class="mkt">${p.market === "tpex" ? "上櫃" : "上市"}</span>
-      ${sideBadge}
+      ${sideBadge}${boBadge}
       ${p.counter ? `<span class="badge ct" title="逆勢配額：與大盤環境主方向相反、以更嚴門檻（活躍命中 ≥3）選出的實驗性標的——環境判定可能錯、強勢股也可能逆勢走，信心自酌">逆勢</span>` : ""}
       ${p.fallback ? `<span class="badge fb" title="未達完整門檻（活躍策略命中不足），為湊滿觀察名單的遞補標的，信心較低">遞補</span>` : ""}
       <span class="score" title="綜合分數（策略權重加總）">${p.score}</span>
@@ -189,15 +201,28 @@ function renderPicks() {
   const shS = sh.short || {};
   const priceLine = (shifted || exitMode || nShort)
     ? `<br>📐 價格模型（多空各自迭代）：${nLong ? `做多 進${shiftTxt(sh.entry ?? 0)}/停利${shiftTxt(sh.target ?? 0)}/停損${shiftTxt(sh.stop ?? 0)}` : ""}${nLong && nShort ? "；" : ""}${nShort ? `做空 進−${shS.entry ?? 0}R/回補−${shS.target ?? 0}R/停損−${shS.stop ?? 0}R` : ""}${exitMode}` : "";
+  // 系統健康度（誠實透明）：近 20 個復盤日的已實現績效——冷streak時直接警示使用者，
+  // 勝過任何假裝有 edge 的優化（連4日虧損的正確第一反應是縮部位，不是加碼調參）
+  let healthLine = "";
+  if (DB.reviews?.length) {
+    const tail = [...DB.reviews].sort((a, b) => a.date.localeCompare(b.date)).slice(-20);
+    const hn = tail.reduce((s, r) => s + (r.summary?.net || 0), 0);
+    const hf = tail.reduce((s, r) => s + (r.summary?.n_filled || 0), 0);
+    const hw = tail.reduce((s, r) => s + (r.summary?.n_wins || 0), 0);
+    const wr = hf ? (hw / hf * 100).toFixed(0) : "–";
+    healthLine = hn < 0
+      ? `<div class="health cold">🥶 <b>系統冷streak警示</b>：近 ${tail.length} 個復盤日合計 <b>−${fmt(-hn)}</b> 元（勝率 ${wr}%）——系統近期沒有優勢。此時的誠實建議是<b>縮小部位或觀望</b>，等汰弱留強與價格模型自我修正回暖，而不是照單全收。</div>`
+      : `<div class="health warm">💚 系統健康度：近 ${tail.length} 個復盤日合計 <b>+${fmt(hn)}</b> 元（勝率 ${wr}%）</div>`;
+  }
   const dawnAt = d.dawn_at ? `（${d.dawn_at.slice(11, 16)} 校正）` : "";
   const dawnNote = d.dawn_corrected
     ? `<br>⚡ <b>清晨校正版</b>${dawnAt}：美股收盤後隔夜訊號與台股寬度判定相反，環境已翻轉、建議單已依新方向重出（晚間初版作廢）。${
         d.dawn_late ? `<br>⚠️ <b>此次校正在開盤後才完成</b>（排程被延遲）——若你已依晚間初版進場，請自行判斷是否調整，不要事後拿這份名單回推早盤決策。` : ""}` : "";
-  $("#picksInfo").innerHTML = n
+  $("#picksInfo").innerHTML = healthLine + (n
     ? `${regimeChip}${onChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
         ? `（含遞補 ${nFb} 檔，訊號較弱）` : ""}${dawnNote}${mixTxt ? `<br>${mixTxt}` : ""}
        <br>已排除處置股／注意股／非當沖標的／不可放空者（做空單）／1張風險超日限者／流動性與波動不足者。${priceLine}${riskSummary}`
-    : `${regimeChip}${onChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`;
+    : `${regimeChip}${onChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`);
   $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
 
@@ -488,11 +513,15 @@ function renderReview() {
     const reasonTxt = { target: "停利", trail: "移動停利", stop: "停損", timeout: "時間停損", close: "收盤沖銷", nofill: "未成交" };
     const rows = d.rows.map((p) => {
       const sm = p.side === "short" ? '<span class="down" title="做空">🔻</span> ' : "";
-      // 當時建議的完整價位（做空鏡像：進場為賣價、突破參考為下方 AL 側）
+      // 當時建議的完整價位（做空鏡像：進場為賣價、突破參考為下方 AL 側；突破模式=穿越觸發追價）
+      const isBo = p.entry_mode === "breakout";
       const lb = p.side === "short"
-        ? { e: "放空", t: "回補停利", s: "停損", a: "順勢跌破" }
-        : { e: "買進 NL", t: "停利 NH", s: "停損 AL", a: "突破 AH" };
-      const planLine = `<div class="plan muted small">${lb.e} ${fmt2(p.entry)}・${lb.t} ${fmt2(p.target)}・${lb.s} ${fmt2(p.stop)}${p.ah != null ? `・${lb.a} ${fmt2(p.ah)}` : ""}${p.trail_dist ? `・移停 ${fmt2(p.trail_dist)}` : ""}</div>`;
+        ? (isBo ? { e: "⚡跌破追空", t: "回補停利", s: "停損", a: "逆勢賣出" }
+                : { e: "放空", t: "回補停利", s: "停損", a: "順勢跌破" })
+        : (isBo ? { e: "⚡漲穿追買", t: "停利", s: "停損", a: "逆勢買進" }
+                : { e: "買進 NL", t: "停利 NH", s: "停損 AL", a: "突破 AH" });
+      const refPx = isBo ? (p.side === "short" ? p.cdp_base?.nh : p.cdp_base?.nl) : p.ah;
+      const planLine = `<div class="plan muted small">${lb.e} ${fmt2(p.entry)}・${lb.t} ${fmt2(p.target)}・${lb.s} ${fmt2(p.stop)}${refPx != null ? `・${lb.a} ${fmt2(refPx)}` : ""}${p.trail_dist ? `・移停 ${fmt2(p.trail_dist)}` : ""}</div>`;
       const nameCell = `${sm}${p.code} ${p.name}${planLine}`;
       if (!p.filled) {
         const reasonHypo = { target: "觸及停利", trail: "移動停利", stop: "觸及停損", timeout: "時間停損", close: "收盤沖銷" };
@@ -503,7 +532,12 @@ function renderReview() {
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
           <td colspan="3">⚠️ 觸價未穿——排隊未必成交（保守記未成交${hypo}）</td><td>–</td></tr>`;
         }
-        const noFillTxt = p.side === "short" ? `未成交（最高 ${fmt2(p.day_high)} 未觸賣價）` : `未成交（最低 ${fmt2(p.day_low)} 未觸價）`;
+        const gaveUp = isBo && (p.side === "short" ? p.day_open <= p.target : p.day_open >= p.target);
+        const noFillTxt = gaveUp
+          ? `未進場（開盤 ${fmt2(p.day_open)} 已越過停利價，不追）`
+          : isBo
+            ? (p.side === "short" ? `未觸發（最低 ${fmt2(p.day_low)} 未跌破觸發價）` : `未觸發（最高 ${fmt2(p.day_high)} 未漲穿觸發價）`)
+            : (p.side === "short" ? `未成交（最高 ${fmt2(p.day_high)} 未觸賣價）` : `未成交（最低 ${fmt2(p.day_low)} 未觸價）`);
         return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
         <td colspan="3">${noFillTxt}</td><td>–</td></tr>`;
       }
@@ -540,7 +574,7 @@ function renderPriceModel() {
   $("#priceModelInfo").innerHTML =
     `進出場建議價＝CDP 基準價＋偏移 ×「訊號日振幅 R」，偏移與<b>出場引擎</b>（地板式移動停利、多時點時間停損）
      每日依最近 <b>${pm.window_days}</b> 個復盤日重放 A/B 實證、績效明顯改善才切換（防止雜訊抖動）。
-     目前：進場 <b>${shiftTxt(sh.entry ?? 0)}</b> · 停利 <b>${shiftTxt(sh.target ?? 0)}</b> ·
+     目前：${sh.mode === "breakout" ? "進場模式 <b>⚡突破追價</b>（漲穿 AH−eR 觸發追買）· " : ""}進場 <b>${shiftTxt(sh.entry ?? 0)}</b> · 停利 <b>${shiftTxt(sh.target ?? 0)}</b> ·
      停損 <b>${shiftTxt(sh.stop ?? 0)}</b> · 移動停利 <b>${sh.trail ? sh.trail + "R" : "關"}</b> ·
      時間停損 <b>${sh.tstop != null ? tstopTime(sh.tstop) : "關"}</b>
      ${s.net != null && s.net_baseline != null ? `｜窗口淨損益 <b>${fmt(s.net)}</b> vs 原始 CDP <b>${fmt(s.net_baseline)}</b> 元` : ""}`;
@@ -558,8 +592,10 @@ function renderPriceModel() {
   const ss = pm.short_stats, shS = pm.short_shifts || {};
   if (ss && ss.n_picks) {
     const sfrCls = ss.fill_target == null ? "" : (ss.fill_rate ?? 0) >= ss.fill_target ? "up" : "down";
-    $("#priceModelInfo").innerHTML += `<br>🔻 <b>空方（獨立迭代）</b>：放空 NH−<b>${shS.entry ?? 0}R</b> ·
-      回補 NL−<b>${shS.target ?? 0}R</b> · 停損 AH−<b>${shS.stop ?? 0}R</b> · 移動停利 <b>${shS.trail ? shS.trail + "R" : "關"}</b> ·
+    $("#priceModelInfo").innerHTML += `<br>🔻 <b>空方（獨立迭代）</b>：${shS.mode === "breakout"
+      ? `<b>⚡突破追價</b>（跌破 AL+<b>${shS.entry ?? 0}R</b> 觸發追空）· 回補 AL−<b>${shS.target ?? 0}R</b> · 停損 進場+<b>${(0.5 - (shS.stop ?? 0)).toFixed(2)}R</b>`
+      : `放空 NH−<b>${shS.entry ?? 0}R</b> ·
+      回補 NL−<b>${shS.target ?? 0}R</b> · 停損 AH−<b>${shS.stop ?? 0}R</b>`} · 移動停利 <b>${shS.trail ? shS.trail + "R" : "關"}</b> ·
       時間停損 <b>${shS.tstop != null ? tstopTime(shS.tstop) : "關"}</b>
       ｜窗口：成交率 <b class="${sfrCls}">${ss.fill_rate ?? "–"}%</b> · 賺賠比 <b>${ss.payoff ?? "–"}</b> ·
       淨損益 <b>${fmt(ss.net)}</b> vs 原始 CDP <b>${fmt(ss.net_baseline)}</b> 元`;

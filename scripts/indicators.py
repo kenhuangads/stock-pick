@@ -35,6 +35,46 @@ def cdp(h: float, l: float, c: float) -> dict:
     }
 
 
+def price_from_shifts(base, day_range, shifts, side="long"):
+    """CDP 基準價 + 價格模型偏移 → (entry, target, stop)。選股（make_pick）與價格
+    模型重放（price_opt._sim_one）都走這裡，保證兩端公式永不漂移。
+
+    revert（逆勢掛單，預設）：
+      多：entry=NL+e·R 掛低接、target=NH+t·R、stop=AL+s·R
+      空：entry=NH−e·R 掛高空、target=NL−t·R、stop=AH−s·R（偏移一律往市場方向）
+    breakout（突破追價，停損單觸發語意——解「方向對、跳空跑掉」的 runaway 錯過）：
+      多：entry=AH−e·R 漲穿觸發追買（e 越大觸發越低=越易成交）、target=AH+t·R、
+          stop=entry−(0.5−s)·R（s 越大停損越緊，與 revert 的心智模型一致）
+      空：entry=AL+e·R 跌破觸發追空、target=AL−t·R、stop=entry+(0.5−s)·R
+    皆保證 停損/停利 與進場的相對位置合法（至少差 1 tick）。"""
+    s = shifts or {}
+    r = day_range
+    if s.get("mode") == "breakout":
+        if side == "short":
+            entry = round_tick(base["al"] + s.get("entry", 0) * r, "down")
+            target = round_tick(base["al"] - s.get("target", 0) * r, "down")
+            stop = round_tick(entry + max(0.5 - s.get("stop", 0), 0.05) * r, "up")
+        else:
+            entry = round_tick(base["ah"] - s.get("entry", 0) * r, "up")
+            target = round_tick(base["ah"] + s.get("target", 0) * r, "up")
+            stop = round_tick(entry - max(0.5 - s.get("stop", 0), 0.05) * r, "down")
+    elif side == "short":
+        entry = round_tick(base["nh"] - s.get("entry", 0) * r, "up")
+        target = round_tick(base["nl"] - s.get("target", 0) * r, "down")
+        stop = round_tick(base["ah"] - s.get("stop", 0) * r, "up")
+    else:
+        entry = round_tick(base["nl"] + s.get("entry", 0) * r, "down")
+        target = round_tick(base["nh"] + s.get("target", 0) * r, "up")
+        stop = round_tick(base["al"] + s.get("stop", 0) * r, "down")
+    if side == "short":
+        stop = max(stop, round_tick(entry + tick_size(entry), "up"))       # 停損必須高於進場
+        target = min(target, round_tick(entry - tick_size(entry), "down"))  # 停利必須低於進場
+    else:
+        stop = min(stop, round_tick(entry - tick_size(entry), "down"))     # 停損必須低於進場
+        target = max(target, round_tick(entry + tick_size(entry), "up"))   # 停利必須高於進場
+    return entry, target, stop
+
+
 def sma(values, n):
     if len(values) < n:
         return None

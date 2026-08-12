@@ -8,7 +8,7 @@
 待樣本數足夠且期望值轉正，optimize.py 會自動賦予權重、正式納入計分。
 之後要實驗新想法，只需在 STRATEGIES 加一條 candidate 定義即可。
 """
-from indicators import breakeven_ticks, round_tick, tick_size
+from indicators import breakeven_ticks, price_from_shifts
 
 # 策略定義：id / 名稱 / 說明 / 判斷函式 / 初始權重
 STRATEGIES = [
@@ -236,52 +236,27 @@ def evaluate(m, weights, side="long"):
     return round(score, 2), hits
 
 
-def shifted_prices(c, day_range, shifts):
-    """CDP 基準價 + 價格模型偏移（單位：當日振幅 R）。
-    偏移由 price_opt.py 依復盤績效滾動迭代；0 偏移＝原始 CDP 價位。"""
-    s = shifts or {}
-    entry = round_tick(c["nl"] + s.get("entry", 0) * day_range, "down")
-    target = round_tick(c["nh"] + s.get("target", 0) * day_range, "up")
-    stop = round_tick(c["al"] + s.get("stop", 0) * day_range, "down")
-    stop = min(stop, round_tick(entry - tick_size(entry), "down"))   # 停損必須低於進場
-    target = max(target, round_tick(entry + tick_size(entry), "up"))  # 停利必須高於進場
-    return entry, target, stop
-
-
-def short_prices(c, day_range, shifts=None):
-    """做空建議價（CDP 完全鏡像＋空方獨立偏移，偏移一律「減」＝往市場方向移動）：
-    放空掛 NH−e·R（逆勢賣出區）、回補停利 NL−t·R、停損 AH−s·R（順勢突破＝看錯）。
-    偏移由 price_opt 以空方復盤紀錄獨立迭代（樣本不足時暫借做多偏移）。
-    保證 停損 > 進場 > 停利。"""
-    s = shifts or {}
-    entry = round_tick(c["nh"] - s.get("entry", 0) * day_range, "up")
-    target = round_tick(c["nl"] - s.get("target", 0) * day_range, "down")
-    stop = round_tick(c["ah"] - s.get("stop", 0) * day_range, "up")
-    stop = max(stop, round_tick(entry + tick_size(entry), "up"))     # 停損必須高於進場
-    target = min(target, round_tick(entry - tick_size(entry), "down"))  # 停利必須低於進場
-    return entry, target, stop
-
-
 def make_pick(m, score, hits, discount, price_shifts=None, side="long"):
     """由 CDP＋價格模型偏移產生隔日建議買賣價（多空各用各的偏移組）。
-    做多：NL 掛買、NH 停利、AL 停損；做空：NH 放空、NL 回補、AH 停損。
+    價位建構走 indicators.price_from_shifts（與 price_opt 重放共用、公式永不漂移）：
+    revert 逆勢掛單——多：NL 掛買、NH 停利、AL 停損；空：NH 放空、NL 回補、AH 停損。
+    breakout 突破追價——多：漲穿 AH−e·R 追買；空：跌破 AL+e·R 追空（停損單觸發語意）。
     出場引擎（移動停利/時間停損）依所屬方向的偏移組決定。"""
     c = m["cdp"]
     day_range = m["high"] - m["low"]
     if side == "short":
         ss = (price_shifts or {}).get("short") or {}
-        entry, target, stop = short_prices(c, day_range, ss)
-        trail_mult = ss.get("trail") or 0
-        tstop = ss.get("tstop")
     else:
-        entry, target, stop = shifted_prices(c, day_range, price_shifts)
-        trail_mult = (price_shifts or {}).get("trail") or 0
-        tstop = (price_shifts or {}).get("tstop")
+        ss = price_shifts or {}
+    entry, target, stop = price_from_shifts(c, day_range, ss, side)
+    trail_mult = ss.get("trail") or 0
+    tstop = ss.get("tstop")
     return {
         "code": m["code"], "name": m["name"], "market": m["market"], "side": side,
         "close": m["close"], "chg_pct": m["chg_pct"],
         "score": score, "strategies": hits,
         "entry": entry, "target": target, "stop": stop, "ah": c["ah"],
+        "entry_mode": ss.get("mode", "revert"),   # revert=逆勢掛單｜breakout=突破追價
         "trail_dist": round(trail_mult * day_range, 2) if trail_mult else None,
         "tstop_bar": tstop,
         "cdp_base": {"nl": c["nl"], "nh": c["nh"], "al": c["al"], "ah": c["ah"], "r": round(day_range, 2)},

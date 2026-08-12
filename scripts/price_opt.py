@@ -34,30 +34,21 @@
    才切換。避免每天在雜訊中反覆跳動。
 4. 所有切換寫入 log，前端「每日復盤」頁完整呈現診斷與軌跡。
 """
-from indicators import round_tick, tick_size
+from indicators import price_from_shifts
 from review import trade_fees, simulate_trade, bars_match_ohlc, limit_down_price, limit_up_price
 from intraday import load_intraday
 
-ZERO = {"entry": 0.0, "target": 0.0, "stop": 0.0, "trail": 0.0, "tstop": None}
+ZERO = {"entry": 0.0, "target": 0.0, "stop": 0.0, "trail": 0.0, "tstop": None, "mode": "revert"}
 
 
 def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="long"):
     """用復盤紀錄裡的 cdp_base 與當日行情（5分K優先），以指定偏移＋出場模式重放一筆模擬。
-    回傳 (filled, net, exit_reason)。走 review.simulate_trade 共用核心，口徑一致。"""
+    回傳 (filled, net, exit_reason)。價位建構走 indicators.price_from_shifts、
+    模擬走 review.simulate_trade——與選股/復盤共用，口徑保證一致。"""
     base = rec["cdp_base"]
     r = base["r"]
-    if side == "short":
-        entry = round_tick(base["nh"] - shifts["entry"] * r, "up")
-        target = round_tick(base["nl"] - shifts["target"] * r, "down")
-        stop = round_tick(base["ah"] - shifts["stop"] * r, "up")
-        stop = max(stop, round_tick(entry + tick_size(entry), "up"))
-        target = min(target, round_tick(entry - tick_size(entry), "down"))
-    else:
-        entry = round_tick(base["nl"] + shifts["entry"] * r, "down")
-        target = round_tick(base["nh"] + shifts["target"] * r, "up")
-        stop = round_tick(base["al"] + shifts["stop"] * r, "down")
-        stop = min(stop, round_tick(entry - tick_size(entry), "down"))
-        target = max(target, round_tick(entry + tick_size(entry), "up"))
+    mode = shifts.get("mode", "revert")
+    entry, target, stop = price_from_shifts(base, r, shifts, side)
     trail_mult = shifts.get("trail") or 0
     trail_dist = round(trail_mult * r, 2) if trail_mult else None
     tstop_bar = shifts.get("tstop")
@@ -66,9 +57,10 @@ def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="lo
     filled, fill, exit_price, reason, _ = simulate_trade(
         entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
         strict_fill=strict_fill, limit_dn=limit_down_price(rec.get("prev_close")),
-        side=side, limit_up=limit_up_price(rec.get("prev_close")))
+        side=side, limit_up=limit_up_price(rec.get("prev_close")), entry_mode=mode)
     if not filled:
         # 未成交且行情往獲利方向跑掉＝「掛太遠錯過行情」（做多看漲過掛價、做空看跌破掛價）
+        # 突破模式的未成交＝行情根本沒往方向走（good skip），c 不可能越過觸發價
         runaway = ohlc["c"] > entry if side == "long" else ohlc["c"] < entry
         return False, 0, ("runaway" if runaway else "nofill")
     if side == "short":
@@ -133,13 +125,63 @@ def _stats_block(cur, base, target_fr):
     }
 
 
+def _nearest_idx(grid, val):
+    """網格中最接近 val 的索引（None 只與 None 相等；不在網格上的舊值取最近點）。"""
+    best, bd = 0, None
+    for i, g in enumerate(grid):
+        if g is None or val is None:
+            d = 0 if g == val else 1e9
+        else:
+            d = abs(g - val)
+        if bd is None or d < bd:
+            best, bd = i, d
+    return best
+
+
+def _step_toward(current, best, grids, max_step):
+    """限步採納：每個維度沿網格向 best 至多移動 max_step 格。
+    20 日窗口樣本僅 30~50 筆、網格數千組——全域跳躍會追著噪音反覆橫跳
+    （實例：8/10 做多一次同時把停損 0.3→0.1、關移動停利、關時間停損，當日 5 筆全拖尾）。
+    限步後需連續多日同方向的證據才走得遠＝天然低通濾波。"""
+    out = dict(current)
+    for dim, grid in grids.items():
+        ci, bi = _nearest_idx(grid, current.get(dim)), _nearest_idx(grid, best[dim])
+        if ci == bi:
+            out[dim] = grid[bi]   # 對齊網格（吸收舊的非網格值）
+        else:
+            step = max(-max_step, min(max_step, bi - ci))
+            out[dim] = grid[ci + step]
+    return out
+
+
+def _fmt_mode(sh):
+    t = f"{sh['trail']:.2f}R" if sh.get("trail") else "關"
+    ts = sh.get("tstop")
+    if ts is not None:
+        mins = 9 * 60 + ts * 5
+        tss = f"{mins // 60:02d}:{mins % 60:02d}"
+    else:
+        tss = "關"
+    em = "、進場=突破追價" if sh.get("mode") == "breakout" else ""
+    return f"移動停利 {t}、時間停損 {tss}{em}"
+
+
 def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_date, side):
     """單一方向的網格搜尋＋遲滯切換。回傳 (current_shifts, cur_stat, base_stat)。
-    records 為該方向的復盤紀錄；current 為現行偏移（就地不改，回傳新 dict）。"""
+    records 為該方向的復盤紀錄；current 為現行偏移（就地不改，回傳新 dict）。
+
+    搜尋空間 = entry×target×stop×trail×tstop×進場模式（revert 逆勢掛單／breakout 突破追價）。
+    採納紀律（max_step_per_day > 0 時）：
+    - 同模式：向全域最佳「每維最多走一格」，防止單日大跳追噪音；
+    - 跨模式：需 mode_switch_margin_mult×margin 的更強證據才切換（切換即整組採納，
+      因新模式下無「現行參數」可錨）；證據不足時退回同模式最佳繼續逐步逼近；
+    - 同分傾向：偏好出場引擎「開啟」（法醫實證 trail/tstop 開優於關——收盤沖銷單
+      午後平均負漂移；舊版偏好「關」導致引擎被窗口噪音關掉）。"""
     label = "做多" if side == "long" else "空方"
     target_fr = pcfg.get("target_fill_rate", 0)
     objective = pcfg.get("objective", "net")
-    current = dict(current)
+    step_lim = pcfg.get("max_step_per_day", 0)
+    current = dict(ZERO, **current)   # 補齊缺漏鍵（舊檔無 mode → revert）
 
     base = _replay(records, ZERO, fees_cfg, lots, strict, side)
     cur = _replay(records, current, fees_cfg, lots, strict, side)
@@ -150,7 +192,12 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
     def win_rate(st):
         return st["wins"] / st["fills"] if st["fills"] else 0.0
 
-    def qualified(st):
+    def qualified(st, mode="revert"):
+        # 成交率硬門檻是「限價掛單」的可執行性要求（掛太遠=建議做不到）。
+        # 突破追價是停損單語意：未觸發=無趨勢不進場（設計目的、非執行失敗），
+        # 拿觸發率當門檻會結構性鎖死該模式——改要求絕對成交筆數達統計門檻。
+        if mode == "breakout":
+            return st["fills"] >= pcfg["min_trades"]
         return fill_rate(st) >= target_fr
 
     if base["fills"] >= pcfg["min_trades"]:
@@ -159,36 +206,61 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
         grid_stop = pcfg.get("stop_grid") or grid_exit   # 停損可用獨立網格（支援更緊的停損）
         grid_trail = pcfg.get("trail_grid", [0])
         grid_tstop = pcfg.get("tstop_grid", [None])
+        modes = pcfg.get("entry_modes") or ["revert"]
         min_payoff = pcfg.get("min_payoff", 1.2)
+        grids = {"entry": grid_entry, "target": grid_exit, "stop": grid_stop,
+                 "trail": grid_trail, "tstop": grid_tstop}
         scored = []
-        for a in grid_entry:
-            for b in grid_exit:
-                for c in grid_stop:
-                    for t in grid_trail:
-                        for ts in grid_tstop:
-                            sh = {"entry": a, "target": b, "stop": c, "trail": t, "tstop": ts}
-                            st = _replay(records, sh, fees_cfg, lots, strict, side)
-                            # 同分時偏好較小偏移與較簡單的出場模式（防過擬合傾向）
-                            dist0 = abs(a) + abs(b) + abs(c) + (0.01 if t else 0) + (0.01 if ts is not None else 0)
-                            scored.append((sh, st, dist0))
-        # 成交率達標為硬門檻；達標組合中依 objective 挑選
-        qual = [x for x in scored if qualified(x[1])]
-        if qual:
-            positive = [x for x in qual if x[1]["net"] > 0]
-            if objective == "payoff" and positive:
-                # 大賺小賠優先：賺賠比達標者中取淨損益最高；無達標者退回正期望值最高
-                good = [x for x in positive if _payoff(x[1]) >= min_payoff]
-                pool = good or positive
-                best_sh, best_st, _ = sorted(pool, key=lambda x: (-x[1]["net"], x[2]))[0]
-            elif objective == "winrate" and positive:
-                best_sh, best_st, _ = sorted(positive, key=lambda x: (-win_rate(x[1]), -x[1]["net"], x[2]))[0]
-            else:  # objective=net 或無任一正期望值 → 取總淨損益最大（保本）
-                best_sh, best_st, _ = sorted(qual, key=lambda x: (-x[1]["net"], x[2]))[0]
-        else:  # 無組合達標成交率 → 逼近目標
-            best_sh, best_st, _ = sorted(scored, key=lambda x: (-fill_rate(x[1]), -x[1]["net"], x[2]))[0]
+        for mode in modes:
+            for a in grid_entry:
+                for b in grid_exit:
+                    for c in grid_stop:
+                        for t in grid_trail:
+                            for ts in grid_tstop:
+                                sh = {"entry": a, "target": b, "stop": c, "trail": t,
+                                      "tstop": ts, "mode": mode}
+                                st = _replay(records, sh, fees_cfg, lots, strict, side)
+                                # 同分傾向：小偏移優先；出場引擎依採納紀律決定偏好方向
+                                if step_lim:
+                                    eng = (0.01 if not t else 0) + (0.01 if ts is None else 0)
+                                else:
+                                    eng = (0.01 if t else 0) + (0.01 if ts is not None else 0)
+                                scored.append((sh, st, abs(a) + abs(b) + abs(c) + eng))
+
+        def _select(pool):
+            """成交率達標為硬門檻；達標組合中依 objective 挑選。回傳 (sh, st)。"""
+            pool = pool or scored   # 防護：同模式池為空（config 移除該模式）時退回全池
+            qual = [x for x in pool if qualified(x[1], x[0].get("mode", "revert"))]
+            if qual:
+                positive = [x for x in qual if x[1]["net"] > 0]
+                if objective == "payoff" and positive:
+                    good = [x for x in positive if _payoff(x[1]) >= min_payoff]
+                    picked = sorted(good or positive, key=lambda x: (-x[1]["net"], x[2]))[0]
+                elif objective == "winrate" and positive:
+                    picked = sorted(positive, key=lambda x: (-win_rate(x[1]), -x[1]["net"], x[2]))[0]
+                else:  # objective=net 或無任一正期望值 → 取總淨損益最大（保本）
+                    picked = sorted(qual, key=lambda x: (-x[1]["net"], x[2]))[0]
+            else:  # 無組合達標成交率 → 逼近目標
+                picked = sorted(pool, key=lambda x: (-fill_rate(x[1]), -x[1]["net"], x[2]))[0]
+            return picked[0], picked[1]
+
+        best_sh, best_st = _select(scored)
+        margin = max(100, abs(cur["net"]) * pcfg["improve_margin_pct"] / 100)
+        mode_jump = best_sh["mode"] != current["mode"]
+        # 新生模型（現行=ZERO、從未調整過）首次達標可自由跳躍：限步保護的是
+        # 「既有參數」不被單日噪音拉走，剛誕生的模型沒有既有可保護——
+        # 否則 walk-forward 重建初期要爬行數十日才到位（出場引擎遲遲未開）。
+        newborn = current == ZERO
+        if step_lim and mode_jump and not newborn:
+            mult = pcfg.get("mode_switch_margin_mult", 2)
+            if not (qualified(best_st, best_sh["mode"]) and best_st["net"] >= cur["net"] + mult * margin):
+                # 跨模式證據不足 → 退回同模式最佳逐步逼近
+                best_sh, best_st = _select([x for x in scored if x[0]["mode"] == current["mode"]])
+                mode_jump = False
 
         if best_sh != current:
-            cur_q, best_q = qualified(cur), qualified(best_st)
+            cur_q = qualified(cur, current["mode"])
+            best_q = qualified(best_st, best_sh["mode"])
             if objective == "winrate":
                 cur_ok = cur_q and cur["net"] > 0
                 best_ok = best_q and best_st["net"] > 0
@@ -196,7 +268,6 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
                          (best_ok and cur_ok and win_rate(best_st) >= win_rate(cur) + 0.02) or \
                          (not best_q and not cur_q and fill_rate(best_st) >= fill_rate(cur) + 0.02)
             else:
-                margin = max(100, abs(cur["net"]) * pcfg["improve_margin_pct"] / 100)
                 switch = (best_q and not cur_q) or \
                          (best_q and cur_q and best_st["net"] >= cur["net"] + margin) or \
                          (not best_q and not cur_q and fill_rate(best_st) >= fill_rate(cur) + 0.02)
@@ -205,22 +276,29 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
                     switch = (_payoff(best_st) >= min_payoff > _payoff(cur)
                               and best_st["net"] > 0 and best_st["net"] >= cur["net"] - margin)
             if switch:
-                def _mode(sh):
-                    t = f"{sh['trail']:.2f}R" if sh.get("trail") else "關"
-                    ts = "12:00" if sh.get("tstop") is not None else "關"
-                    return f"移動停利 {t}、時間停損 {ts}"
-                def _pf(st):
-                    p = _payoff(st)
-                    return "∞" if p == float("inf") else f"{p:.2f}"
-                log.append({"date": as_of_date,
-                            "msg": f"{label}價格模型調整：進場 {current['entry']:+.2f}→{best_sh['entry']:+.2f}R、"
-                                   f"停利 {current['target']:+.2f}→{best_sh['target']:+.2f}R、"
-                                   f"停損 {current['stop']:+.2f}→{best_sh['stop']:+.2f}R、{_mode(best_sh)}"
-                                   f"（成交率 {fill_rate(cur)*100:.1f}%→{fill_rate(best_st)*100:.1f}%、"
-                                   f"勝率 {win_rate(cur)*100:.1f}%→{win_rate(best_st)*100:.1f}%、"
-                                   f"賺賠比 {_pf(cur)}→{_pf(best_st)}、"
-                                   f"窗口淨損益 {cur['net']:,} → {best_st['net']:,} 元）"})
-                current, cur = best_sh, best_st
+                adopt_sh, adopt_st = best_sh, best_st
+                if step_lim and not mode_jump and not newborn:
+                    cand = _step_toward(current, best_sh, grids, step_lim)
+                    cand["mode"] = current["mode"]
+                    if cand == current:
+                        adopt_sh = None   # 網格對齊後無步可走：本日不動
+                    elif cand != best_sh:
+                        adopt_sh, adopt_st = cand, _replay(records, cand, fees_cfg, lots, strict, side)
+                if adopt_sh is not None:
+                    def _pf(st):
+                        p = _payoff(st)
+                        return "∞" if p == float("inf") else f"{p:.2f}"
+                    stepped = "（逐步趨近全域最佳）" if adopt_sh != best_sh else ""
+                    jumped = "⚡切換進場模式：" if mode_jump else ""
+                    log.append({"date": as_of_date,
+                                "msg": f"{label}價格模型調整：{jumped}進場 {current['entry']:+.2f}→{adopt_sh['entry']:+.2f}R、"
+                                       f"停利 {current['target']:+.2f}→{adopt_sh['target']:+.2f}R、"
+                                       f"停損 {current['stop']:+.2f}→{adopt_sh['stop']:+.2f}R、{_fmt_mode(adopt_sh)}"
+                                       f"（成交率 {fill_rate(cur)*100:.1f}%→{fill_rate(adopt_st)*100:.1f}%、"
+                                       f"勝率 {win_rate(cur)*100:.1f}%→{win_rate(adopt_st)*100:.1f}%、"
+                                       f"賺賠比 {_pf(cur)}→{_pf(adopt_st)}、"
+                                       f"窗口淨損益 {cur['net']:,} → {adopt_st['net']:,} 元）{stepped}"})
+                    current, cur = adopt_sh, adopt_st
 
     return current, cur, base
 
