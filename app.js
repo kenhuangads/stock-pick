@@ -120,7 +120,7 @@ function stockCard(p, rank) {
          <div><div class="lb">回補停利</div><div class="v buy">${fmt2(p.target)}</div></div>
          <div><div class="lb">停損</div><div class="v ah">${fmt2(p.stop)}</div></div>
          <div><div class="lb">逆勢賣出 NH</div><div class="v sl">${fmt2(p.cdp_base?.nh ?? "")}</div></div>`
-      : `<div><div class="lb">建議放空 NH</div><div class="v tp">${fmt2(p.entry)}</div></div>
+      : `<div><div class="lb" title="開盤若已高於此價（跳空穿價），依紀律作廢此單——「更好的空點」是隔夜動能反向的軋空起點，10 路徑實證均 −326/筆">建議放空 NH</div><div class="v tp">${fmt2(p.entry)}</div></div>
        <div><div class="lb">回補停利 NL</div><div class="v buy">${fmt2(p.target)}</div></div>
        <div><div class="lb">停損 AH</div><div class="v ah">${fmt2(p.stop)}</div></div>
        <div><div class="lb">破底加碼 AL</div><div class="v sl">${fmt2(p.cdp_base?.al ?? p.target)}</div></div>`)
@@ -129,7 +129,7 @@ function stockCard(p, rank) {
          <div><div class="lb">停利</div><div class="v tp">${fmt2(p.target)}</div></div>
          <div><div class="lb">停損</div><div class="v sl">${fmt2(p.stop)}</div></div>
          <div><div class="lb">逆勢買進 NL</div><div class="v ah">${fmt2(p.cdp_base?.nl ?? "")}</div></div>`
-      : `<div><div class="lb">建議買進 NL</div><div class="v buy">${fmt2(p.entry ?? p.cdp?.nl)}</div></div>
+      : `<div><div class="lb" title="開盤若已低於此價（跳空穿價），依紀律作廢此單——「更便宜」的開盤價是隔夜動能反向的接刀，10 路徑實證均 −326/筆">建議買進 NL</div><div class="v buy">${fmt2(p.entry ?? p.cdp?.nl)}</div></div>
        <div><div class="lb">停利 NH</div><div class="v tp">${fmt2(p.target ?? p.cdp?.nh)}</div></div>
        <div><div class="lb">停損 AL</div><div class="v sl">${fmt2(p.stop ?? p.cdp?.al)}</div></div>
        <div><div class="lb">順勢突破 AH</div><div class="v ah">${fmt2(p.ah ?? p.cdp?.ah)}</div></div>`);
@@ -191,6 +191,9 @@ function renderPicks() {
   // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方主做多、<0.5 空方主做空
   const regimeChip = rg && rg.breadth_ma != null
     ? `<span class="badge ${rg.bull ? "on" : "off"}" title="市場寬度＝全市場上漲家數比的 5 日均；≥50% 多方環境以做多為主、<50% 空方環境以做空為主，另保留少量更嚴門檻的逆勢配額">${rg.bull ? "🌤 多方環境 → 做多為主" : "⛈ 空方環境 → 做空為主"}｜寬度5MA ${(rg.breadth_ma * 100).toFixed(0)}%</span> ` : "";
+  // 翻向日護欄徽章：主方向與前一復盤日不同＝方向可信度最低的日子（10 路徑有 9 條翻向日均為負）
+  const flipChip = rg?.flip
+    ? `<span class="badge ct" title="主方向與前一交易日相反（寬度 5MA 貼近 50% 的震盪期最常見）——跨 10 條 walk-forward 路徑有 9 條在翻向日平均虧損，故本日主方向名單自動縮編、不遞補；請自行斟酌再縮小部位">⚠️ 環境翻向日｜名單已縮編</span> ` : "";
   // 隔夜訊號徽章（清晨校正）：美股收盤加權（費半50%+S&P30%+NASDAQ20%），突破門檻且與寬度相反時翻轉環境
   const on = rg?.overnight;
   const onChip = on && on.w != null
@@ -219,10 +222,10 @@ function renderPicks() {
     ? `<br>⚡ <b>清晨校正版</b>${dawnAt}：美股收盤後隔夜訊號與台股寬度判定相反，環境已翻轉、建議單已依新方向重出（晚間初版作廢）。${
         d.dawn_late ? `<br>⚠️ <b>此次校正在開盤後才完成</b>（排程被延遲）——若你已依晚間初版進場，請自行判斷是否調整，不要事後拿這份名單回推早盤決策。` : ""}` : "";
   $("#picksInfo").innerHTML = healthLine + (n
-    ? `${regimeChip}${onChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
+    ? `${regimeChip}${flipChip}${onChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
         ? `（含遞補 ${nFb} 檔，訊號較弱）` : ""}${dawnNote}${mixTxt ? `<br>${mixTxt}` : ""}
        <br>已排除處置股／注意股／非當沖標的／不可放空者（做空單）／1張風險超日限者／流動性與波動不足者。${priceLine}${riskSummary}`
-    : `${regimeChip}${onChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`);
+    : `${regimeChip}${flipChip}${onChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`);
   $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
     `<div class="empty">今日無推薦標的</div>`;
 
@@ -531,6 +534,10 @@ function renderReview() {
             : "";
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
           <td colspan="3">⚠️ 觸價未穿——排隊未必成交（保守記未成交${hypo}）</td><td>–</td></tr>`;
+        }
+        if (p.exit_reason === "gapvoid") {
+          return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
+          <td colspan="3">🚫 開盤 ${fmt2(p.day_open)} 已穿掛價——依紀律作廢（隔夜動能反向，「更便宜」是接刀；10路徑實證穿價開盤成交均 −326/筆）</td><td>–</td></tr>`;
         }
         const gaveUp = isBo && (p.side === "short" ? p.day_open <= p.target : p.day_open >= p.target);
         const noFillTxt = gaveUp

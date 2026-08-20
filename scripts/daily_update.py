@@ -112,18 +112,36 @@ def regime_state(snapshots, cfg, overnight_row=None):
             "overnight": overnight_row, "overnight_flip": on_flip}
 
 
-def screen_book(market, cfg, weights, shifts, regime):
+def _main_side(review_entry):
+    """一個復盤日的主方向＝非逆勢單的多數方向（無主向單回 None）。"""
+    mains = [p for p in (review_entry or {}).get("picks", []) if not p.get("counter")]
+    if not mains:
+        return None
+    n_long = sum(1 for p in mains if p.get("side", "long") == "long")
+    return "long" if n_long * 2 >= len(mains) else "short"
+
+
+def screen_book(market, cfg, weights, shifts, regime, prev_book=None):
     """組當日建議單：主方向（順大盤環境）為主，保留少量「逆勢配額」給另一方向——
     當沖多空皆有機會，環境判定也可能錯；逆勢單門檻更嚴（counter_min_hits）、
     無遞補、數量受 counter_quota 限制，並標記 counter=True 供前端明示與後續實證。
     總檔數維持 max_picks：主方向 = max_picks − 實際逆勢檔數。
     counter_sides（選配）：限制逆勢配額只開放給指定方向——94 日同路徑歸因：
     逆勢多（空頭環境買強勢）+18,354、逆勢空（多頭環境空弱勢）6 月起連三月失血
-    （台股結構性偏多、軋空頻繁，多頭環境空弱勢＝接刀），故預設只留 ["long"]。"""
+    （台股結構性偏多、軋空頻繁，多頭環境空弱勢＝接刀），故預設只留 ["long"]。
+    翻向日護欄（flip_max_picks，prev_book=前一復盤日主方向）：主方向與前一日不同的
+    「翻向日」跨 10 條 walk-forward 路徑有 9 條日均為負（−87～−1,779/日；寬度 5MA 在
+    震盪市貼著 50% 來回＝方向可信度最低的日子），故翻向日主方向名單縮編、不遞補；
+    不改方向判定本身（遲滯帶改方向曾複驗失敗）、逆勢配額照常（它是對沖）。"""
     rcfg = cfg.get("regime_filter") or {}
     main = regime["book"]
     counter = "short" if main == "long" else "long"
     max_picks = cfg.get("max_picks", 8)
+    flip_cap = int(rcfg.get("flip_max_picks", 0) or 0)
+    flip = bool(regime["enabled"] and flip_cap and prev_book and main != prev_book)
+    regime["flip"] = flip   # 供前端明示「環境翻向日」與復盤歸因
+    if flip:
+        max_picks = min(max_picks, flip_cap)
     counter_picks = []
     quota = int(rcfg.get("counter_quota", 0) or 0)
     allowed = rcfg.get("counter_sides")   # None/缺省＝雙向皆可
@@ -138,7 +156,7 @@ def screen_book(market, cfg, weights, shifts, regime):
             p["counter"] = True
     c1 = dict(cfg)
     c1["max_picks"] = max(0, max_picks - len(counter_picks))
-    main_picks = screen(market, c1, weights, shifts, side=main)
+    main_picks = screen(market, c1, weights, shifts, side=main, allow_fallback=not flip)
     return main_picks + counter_picks
 
 
@@ -149,7 +167,8 @@ def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc, overnight_ro
     weights, strat_doc = run_optimize(reviews, cfg, strat_doc, latest_date)
     shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
     regime = regime_state(snapshots, cfg, overnight_row)
-    picks = screen_book(market, cfg, weights, shifts, regime)
+    picks = screen_book(market, cfg, weights, shifts, regime,
+                        prev_book=_main_side(reviews[-1]) if reviews else None)
     for m in market.values():  # 供前端自訂選股使用的個股觸發標記（多空皆計）
         sl, hl = evaluate(m, weights, "long")
         ss, hs = evaluate(m, weights, "short")
@@ -223,7 +242,8 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         # 隔夜訊號＝美東 trade_date-1 收盤（台灣 trade_date 清晨可得）→ 模擬「清晨校正」視角
         on_row = overnight_for(trade_date, on_doc) if on_doc else None
         regime = regime_state(upto, cfg, on_row)   # 環境閘門同樣只看歷史（walk-forward 誠實）
-        picks = screen_book(market, cfg, weights, shifts, regime)
+        picks = screen_book(market, cfg, weights, shifts, regime,
+                            prev_book=_main_side(reviews[-1]) if reviews else None)
         picks_doc = {"generated_on": latest_date, "picks": picks}
         bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff
                 else load_intraday(trade_date))

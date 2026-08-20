@@ -43,7 +43,8 @@ def audit():
                 p["entry"], p["target"], p["stop"], ohlc, bars,
                 p.get("trail_dist"), p.get("tstop_bar"),
                 strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
-                side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode)
+                side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
+                gap_void=cfg.get("simulation", {}).get("gap_void", False))
             if (filled, fill, exitp, reason, mode) != (
                     p["filled"], p["fill_price"], p["exit_price"], p["exit_reason"], p["sim_mode"]):
                 issues.append(f"{date} {p['code']} 重放不一致："
@@ -79,7 +80,13 @@ def audit():
                     issues.append(f"{date} {p['code']} 停損出場價 {p['exit_price']} 高於停損價 {p['stop']}（未跳空卻優於停損）")
             if not p["filled"] and any(fillable(b) for b in bars):
                 gave_up = False
-                if emode == "breakout":
+                if p.get("exit_reason") == "gapvoid":
+                    # 開盤穿價作廢：合法的主動放棄——但開盤價必須真的穿過掛價
+                    gave_up = (p["day_open"] > p["entry"]) if side == "short" else (p["day_open"] < p["entry"])
+                    if not gave_up:
+                        issues.append(f"{date} {p['code']} 標記 gapvoid 但開盤未穿掛價")
+                        continue
+                elif emode == "breakout":
                     # 突破單合法的「觸發但未進場」：觸發根開盤已越過停利價 → 引擎不追（放棄）
                     fb = next(b for b in bars if fillable(b))
                     gave_up = (fb[0] <= p["target"]) if side == "short" else (fb[0] >= p["target"])

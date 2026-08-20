@@ -67,14 +67,18 @@ def bars_match_ohlc(bars, ohlc, tol=0.005, min_bars=40):
 
 
 def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
-                    strict_fill=False, limit_up=None, entry_mode="revert"):
+                    strict_fill=False, limit_up=None, entry_mode="revert", gap_void=False):
     """做空模擬（做多邏輯的鏡像）：放空掛 entry（高、逆勢賣出區），
     回補停利 target（低）、停損 stop（高）。價格上漲＝虧損方向。
     移動停利：觸及回補價後追蹤「谷底＋trail」，讓下跌的尾巴多跑；原回補價為天花板。
     entry_mode="breakout"：跌破追空（停損賣單）——價格「跌穿」entry 觸發放空；
     跳空開低以開盤價成交（開盤已低於停利價則不追、視為放棄）；
-    strict_fill 於停損單語意＝滑價：急殺觸發以觸發價−1 tick 成交（保守）。"""
+    strict_fill 於停損單語意＝滑價：急殺觸發以觸發價−1 tick 成交（保守）。
+    gap_void：開盤已「穿過」掛空價（開盤 > entry）→ 作廢不進場——跨 10 條 walk-forward
+    路徑的類別記帳：開盤穿價成交的單 9/10 路徑負期望（隔夜動能反向＝掛單前提已死）。"""
     breakout = entry_mode == "breakout"
+    if gap_void and not breakout and ohlc["o"] > entry:
+        return False, None, None, "gapvoid", "intraday" if bars else "daily"
 
     def stop_px(px, bh):
         # 停損回補價修正：觸及漲停的根，市價買回最差以漲停價成交（不可能更便宜）
@@ -158,7 +162,7 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
 
 def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
                    strict_fill=False, limit_dn=None, side="long", limit_up=None,
-                   entry_mode="revert"):
+                   entry_mode="revert", gap_void=False):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
     side="short" 走完全鏡像的做空邏輯（放空掛高、回補在低、停損在高、漲停穿越修正）。
@@ -168,11 +172,17 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
     limit_dn/limit_up: 當日跌停/漲停價——停損觸發根若已觸及，市價單最差以停板價成交（修正尾部風險低估）。
     entry_mode="breakout"：突破追價（停損單語意）——做多「漲穿」entry 觸發追買、做空「跌穿」觸發追空；
     跳空開越以開盤價成交（開盤已越過停利價則不追）；strict_fill 於此語意＝滑價 1 tick（保守）。
-    出場理由：target 停利｜trail 移動停利｜stop 停損｜timeout 時間停損｜close 收盤沖銷｜nofill 未成交。"""
+    gap_void：逆勢掛單的「開盤穿價作廢」——開盤已越過掛價（多：開盤 < entry；空：開盤 > entry）
+    即整日作廢不進場。依據：跨 10 條 walk-forward 路徑，開盤穿價成交（舊制以開盤價「更好價」成交）
+    的單 9/10 路徑負期望（平均 −326/筆）——隔夜動能反向時「便宜買到」是接刀；開盤恰等於掛價仍成交。
+    出場理由：target 停利｜trail 移動停利｜stop 停損｜timeout 時間停損｜close 收盤沖銷｜
+    nofill 未成交｜gapvoid 開盤穿價作廢。"""
     if side == "short":
         return _simulate_short(entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
-                               strict_fill, limit_up, entry_mode)
+                               strict_fill, limit_up, entry_mode, gap_void)
     breakout = entry_mode == "breakout"
+    if gap_void and not breakout and ohlc["o"] < entry:
+        return False, None, None, "gapvoid", "intraday" if bars else "daily"
 
     def stop_px(px, bl):
         # 停損出場價修正：觸及跌停的根，最差以跌停價成交
@@ -283,14 +293,15 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         strict_fill=sim_cfg.get("strict_fill", False),
         limit_dn=limit_down_price(pick.get("close")),
         side=side, limit_up=limit_up_price(pick.get("close")),
-        entry_mode=pick.get("entry_mode", "revert"))
+        entry_mode=pick.get("entry_mode", "revert"),
+        gap_void=sim_cfg.get("gap_void", False))
     r["sim_mode"], r["exit_reason"] = mode, reason
     if not filled:
         # 「觸價未穿」誠實標註：價格恰好觸及掛價但未穿越——排隊前段可能成交、
         # 後段買不到（不確定成交）。保守口徑仍記未成交（防逆選擇灌水），
         # 但附上「若排到隊」的假想結果供人工判讀（例：8/4 旺宏 109.5 觸最低即飛）。
-        # 突破追價單無排隊問題（觸發即以滑價成交），不適用此標註。
-        touched = (pick.get("entry_mode", "revert") != "breakout" and
+        # 突破追價單無排隊問題（觸發即以滑價成交）、開盤穿價作廢單是主動放棄——皆不適用此標註。
+        touched = (pick.get("entry_mode", "revert") != "breakout" and reason != "gapvoid" and
                    ((ohlc["h"] >= pick["entry"]) if side == "short" else (ohlc["l"] <= pick["entry"])))
         if touched and sim_cfg.get("strict_fill"):
             r["touch_only"] = True

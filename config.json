@@ -80,7 +80,8 @@
   },
   "simulation": {
     "lots_per_trade": 1,
-    "strict_fill": true
+    "strict_fill": true,
+    "gap_void": true
   },
   "risk": {
     "daily_loss_limit": 10000,
@@ -96,7 +97,8 @@
     "breadth_ma": 5,
     "min_breadth": 0.5,
     "counter_quota": 2,
-    "counter_min_hits": 3
+    "counter_min_hits": 3,
+    "flip_max_picks": 4
   },
   "overnight": {
     "enabled": true,

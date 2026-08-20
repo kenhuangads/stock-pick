@@ -41,7 +41,7 @@ from intraday import load_intraday
 ZERO = {"entry": 0.0, "target": 0.0, "stop": 0.0, "trail": 0.0, "tstop": None, "mode": "revert"}
 
 
-def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="long"):
+def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="long", gap_void=False):
     """用復盤紀錄裡的 cdp_base 與當日行情（5分K優先），以指定偏移＋出場模式重放一筆模擬。
     回傳 (filled, net, exit_reason)。價位建構走 indicators.price_from_shifts、
     模擬走 review.simulate_trade——與選股/復盤共用，口徑保證一致。"""
@@ -57,8 +57,11 @@ def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="lo
     filled, fill, exit_price, reason, _ = simulate_trade(
         entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
         strict_fill=strict_fill, limit_dn=limit_down_price(rec.get("prev_close")),
-        side=side, limit_up=limit_up_price(rec.get("prev_close")), entry_mode=mode)
+        side=side, limit_up=limit_up_price(rec.get("prev_close")), entry_mode=mode,
+        gap_void=gap_void)
     if not filled:
+        if reason == "gapvoid":
+            return False, 0, "gapvoid"   # 開盤穿價主動作廢：非「掛太遠」、不計 runaway
         # 未成交且行情往獲利方向跑掉＝「掛太遠錯過行情」（做多看漲過掛價、做空看跌破掛價）
         # 突破模式的未成交＝行情根本沒往方向走（good skip），c 不可能越過觸發價
         runaway = ohlc["c"] > entry if side == "long" else ohlc["c"] < entry
@@ -72,12 +75,13 @@ def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="lo
     return True, net, reason
 
 
-def _replay(records, shifts, fees_cfg, lots, strict_fill=False, side="long"):
+def _replay(records, shifts, fees_cfg, lots, strict_fill=False, side="long", gap_void=False):
     """整個窗口以指定偏移＋出場模式重放，回傳統計。records: [(rec, bars), ...]"""
     stat = {"n": len(records), "fills": 0, "net": 0, "wins": 0, "gw": 0, "gl": 0,
-            "target": 0, "stop": 0, "close": 0, "trail": 0, "timeout": 0, "runaway": 0}
+            "target": 0, "stop": 0, "close": 0, "trail": 0, "timeout": 0, "runaway": 0,
+            "gapvoid": 0}
     for rec, bars in records:
-        filled, net, reason = _sim_one(rec, shifts, fees_cfg, lots, bars, strict_fill, side)
+        filled, net, reason = _sim_one(rec, shifts, fees_cfg, lots, bars, strict_fill, side, gap_void)
         if filled:
             stat["fills"] += 1
             stat["net"] += net
@@ -89,6 +93,8 @@ def _replay(records, shifts, fees_cfg, lots, strict_fill=False, side="long"):
             stat[reason] += 1
         elif reason == "runaway":
             stat["runaway"] += 1
+        elif reason == "gapvoid":
+            stat["gapvoid"] += 1
     return stat
 
 
@@ -110,7 +116,9 @@ def _stats_block(cur, base, target_fr):
     return {
         "n_picks": cur["n"],
         "fills": cur["fills"],
-        "fill_rate": _pct(cur["fills"], cur["n"]),
+        # 成交率分母排除開盤穿價作廢單（主動撤單非掛太遠；與優化器資格門檻同口徑）
+        "fill_rate": _pct(cur["fills"], cur["n"] - cur.get("gapvoid", 0)),
+        "void_rate": _pct(cur.get("gapvoid", 0), cur["n"]),
         "fill_target": round(target_fr * 100, 1) if target_fr else None,
         "win_rate": _pct(cur["wins"], cur["fills"]),
         "payoff": (round(_payoff(cur), 2) if _payoff(cur) != float("inf") else None),  # 賺賠比
@@ -166,7 +174,8 @@ def _fmt_mode(sh):
     return f"移動停利 {t}、時間停損 {tss}{em}"
 
 
-def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_date, side):
+def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_date, side,
+                   gap_void=False):
     """單一方向的網格搜尋＋遲滯切換。回傳 (current_shifts, cur_stat, base_stat)。
     records 為該方向的復盤紀錄；current 為現行偏移（就地不改，回傳新 dict）。
 
@@ -183,11 +192,12 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
     step_lim = pcfg.get("max_step_per_day", 0)
     current = dict(ZERO, **current)   # 補齊缺漏鍵（舊檔無 mode → revert）
 
-    base = _replay(records, ZERO, fees_cfg, lots, strict, side)
-    cur = _replay(records, current, fees_cfg, lots, strict, side)
+    base = _replay(records, ZERO, fees_cfg, lots, strict, side, gap_void)
+    cur = _replay(records, current, fees_cfg, lots, strict, side, gap_void)
 
     def fill_rate(st):
-        return st["fills"] / st["n"] if st["n"] else 0.0
+        denom = st["n"] - st.get("gapvoid", 0)   # 作廢單=主動撤單，不入成交率分母
+        return st["fills"] / denom if denom else 0.0
 
     def win_rate(st):
         return st["wins"] / st["fills"] if st["fills"] else 0.0
@@ -219,7 +229,7 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
                             for ts in grid_tstop:
                                 sh = {"entry": a, "target": b, "stop": c, "trail": t,
                                       "tstop": ts, "mode": mode}
-                                st = _replay(records, sh, fees_cfg, lots, strict, side)
+                                st = _replay(records, sh, fees_cfg, lots, strict, side, gap_void)
                                 # 同分傾向：小偏移優先；出場引擎依採納紀律決定偏好方向
                                 if step_lim:
                                     eng = (0.01 if not t else 0) + (0.01 if ts is None else 0)
@@ -283,7 +293,7 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
                     if cand == current:
                         adopt_sh = None   # 網格對齊後無步可走：本日不動
                     elif cand != best_sh:
-                        adopt_sh, adopt_st = cand, _replay(records, cand, fees_cfg, lots, strict, side)
+                        adopt_sh, adopt_st = cand, _replay(records, cand, fees_cfg, lots, strict, side, gap_void)
                 if adopt_sh is not None:
                     def _pf(st):
                         p = _payoff(st)
@@ -334,20 +344,21 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
             recs[side].append((r, b))
     fees_cfg, lots = cfg["fees"], cfg["simulation"]["lots_per_trade"]
     strict = cfg.get("simulation", {}).get("strict_fill", False)
+    gap_void = cfg.get("simulation", {}).get("gap_void", False)
     target_fr = pcfg.get("target_fill_rate", 0)
 
     cur_long, stat_long, base_long = _optimize_side(
-        recs["long"], pcfg, fees_cfg, lots, strict, cur_long, log, as_of_date, "long")
+        recs["long"], pcfg, fees_cfg, lots, strict, cur_long, log, as_of_date, "long", gap_void)
 
     # 做空側：樣本不足時暫借做多偏移起步（掛單成交的物理對稱：偏移一律往市場方向移動）
-    base_short_probe = _replay(recs["short"], ZERO, fees_cfg, lots, strict, "short")
+    base_short_probe = _replay(recs["short"], ZERO, fees_cfg, lots, strict, "short", gap_void)
     if base_short_probe["fills"] < pcfg["min_trades"] and cur_short == ZERO and cur_long != ZERO:
         cur_short = dict(cur_long)
         log.append({"date": as_of_date,
                     "msg": f"空方價格模型樣本不足（窗口成交 {base_short_probe['fills']} 筆 < {pcfg['min_trades']}），"
                            f"暫借做多側偏移起步（進場 {cur_long['entry']:+.2f}R 等），樣本足夠後自動獨立優化"})
     cur_short, stat_short, base_short = _optimize_side(
-        recs["short"], pcfg, fees_cfg, lots, strict, cur_short, log, as_of_date, "short")
+        recs["short"], pcfg, fees_cfg, lots, strict, cur_short, log, as_of_date, "short", gap_void)
 
     doc = {
         "updated": as_of_date,
