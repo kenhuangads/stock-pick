@@ -10,7 +10,8 @@
     "exclude_punish": true,
     "exclude_notice": true,
     "require_daytrade_eligible": true,
-    "min_chg_pct": 5
+    "min_chg_pct": 5,
+    "min_r_pct": 0
   },
   "max_picks": 8,
   "min_strategies_triggered": 2,

@@ -203,6 +203,15 @@ def passes_base_filters(m, cfg, side="long"):
         return False
     if m["amp_avg"] < f["min_amp20_pct"]:
         return False
+    # 訊號日振幅下限（R/收盤，`min_r_pct`）——**預設 0＝關閉，未通過複驗**。
+    # 動機：R 決定 CDP 各價位間距，R 太窄則停利空間不足以覆蓋 0.435% 摩擦成本。
+    # 樣本內分桶確實漂亮（停損距離 <5% 的 47 筆平均 −430/筆，≥5% 的 252 筆 +43/筆），
+    # 但 walk-forward A/B 三檔門檻 4%/5%/6% 得到 −5,361 / +63,888 / −6,729——
+    # 孤立尖峰；且「R≥5% + 時間停損10:30」的組合測試把 +63,888 打回 +21,014，
+    # 證實為路徑運氣（本系統單一路徑噪音幅度達 ±60,000）。保留旗標供樣本累積後重測。
+    min_r = f.get("min_r_pct", 0)
+    if min_r and m["close"] and (m["high"] - m["low"]) / m["close"] * 100 < min_r:
+        return False
     if f.get("exclude_punish", True) and m["flags"]["punish"]:
         return False
     if f.get("exclude_notice", True) and m["flags"]["notice"]:
