@@ -152,6 +152,8 @@ function stockCard(p, rank) {
       <span>成交 ${fmt(p.vol_lots)} 張</span>
       ${p.dt_ratio != null ? `<span>當沖率 ${fmt2(p.dt_ratio)}%</span>` : ""}
       ${p.breakeven_ticks != null ? `<span>回本約 ${p.breakeven_ticks} 檔</span>` : ""}
+      ${p.trail_dist ? `<span title="觸及停利價後改追蹤高點回落 ${fmt2(p.trail_dist)} 出場（停利價為地板）">移停 ${fmt2(p.trail_dist)}</span>` : ""}
+      ${p.tstop_bar != null ? `<span title="此時刻前未觸停利即以當時市價出場（出場價事前不可知）">時停 ${tstopTime(p.tstop_bar)}</span>` : ""}
     </div>
     ${riskBadgeHtml(p)}
   </div>`;
@@ -524,7 +526,7 @@ function renderReview() {
         : (isBo ? { e: "⚡漲穿追買", t: "停利", s: "停損", a: "逆勢買進" }
                 : { e: "買進 NL", t: "停利 NH", s: "停損 AL", a: "突破 AH" });
       const refPx = isBo ? (p.side === "short" ? p.cdp_base?.nh : p.cdp_base?.nl) : p.ah;
-      const planLine = `<div class="plan muted small">${lb.e} ${fmt2(p.entry)}・${lb.t} ${fmt2(p.target)}・${lb.s} ${fmt2(p.stop)}${refPx != null ? `・${lb.a} ${fmt2(refPx)}` : ""}${p.trail_dist ? `・移停 ${fmt2(p.trail_dist)}` : ""}</div>`;
+      const planLine = `<div class="plan muted small">${lb.e} ${fmt2(p.entry)}・${lb.t} ${fmt2(p.target)}・${lb.s} ${fmt2(p.stop)}${refPx != null ? `・${lb.a} ${fmt2(refPx)}` : ""}${p.trail_dist ? `・移停 ${fmt2(p.trail_dist)}` : ""}${p.tstop_bar != null ? `・時停 ${tstopTime(p.tstop_bar)}` : ""}</div>`;
       const nameCell = `${sm}${p.code} ${p.name}${planLine}`;
       if (!p.filled) {
         const reasonHypo = { target: "觸及停利", trail: "移動停利", stop: "觸及停損", timeout: "時間停損", close: "收盤沖銷" };
