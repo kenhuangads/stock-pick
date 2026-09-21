@@ -241,3 +241,5 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 
 /* 復盤明細:當時建議的完整價位（次行小字） */
 .trades .plan { font-size: 11px; margin-top: 2px; white-space: nowrap; opacity: .85; }
+
+.exit-rule { margin: .3rem 0 .1rem; padding: .35rem .5rem; font-size: .8rem; line-height: 1.45; border-left: 2px solid rgba(245,192,78,.55); background: rgba(245,192,78,.05); border-radius: 0 6px 6px 0; }

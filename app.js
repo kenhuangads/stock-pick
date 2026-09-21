@@ -105,6 +105,20 @@ function sparkline(closes, w = 96, h = 30) {
     title="近 ${closes.length} 日收盤走勢"><polyline points="${pts}" fill="none"
     stroke="${up ? "var(--up)" : "var(--down)"}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
 }
+function exitRuleHtml(p) {
+  // 出場規則必須用完整句子寫在卡片上：移動停利／時間停損的出場價是盤中才決定的，
+  // 復盤會出現卡片四個價位以外的數字（例：9/18 全友停利 55.1 地板、實際追高回落於 57.9 出場）
+  if (!p.trail_dist && p.tstop_bar == null) return "";
+  const short = p.side === "short";
+  const parts = [];
+  if (p.trail_dist)
+    parts.push(short
+      ? `觸及回補價 <b>${fmt2(p.target)}</b> 後<b>不立刻回補</b>，改追蹤盤中低點、反彈 <b>${fmt2(p.trail_dist)}</b> 元時回補（${fmt2(p.target)} 為天花板，最差在此回補）`
+      : `觸及停利 <b>${fmt2(p.target)}</b> 後<b>不立刻賣</b>，改追蹤盤中高點、回落 <b>${fmt2(p.trail_dist)}</b> 元時賣出（${fmt2(p.target)} 為地板，最差在此賣）`);
+  if (p.tstop_bar != null)
+    parts.push(`<b>${tstopTime(p.tstop_bar)}</b> 前仍未觸及${short ? "回補價" : "停利"} → 以當時市價出場`);
+  return `<div class="exit-rule">⏱ 出場規則：${parts.join("；")}。<span class="muted">這兩種出場價盤中才決定，復盤會出現卡片以外的數字。</span></div>`;
+}
 function stockCard(p, rank) {
   const tags = (p.strategies || [])
     .map((id) => `<span class="tag" title="${stratMeta[id]?.desc || ""}">${stratMeta[id]?.name || id}</span>`)
@@ -152,9 +166,8 @@ function stockCard(p, rank) {
       <span>成交 ${fmt(p.vol_lots)} 張</span>
       ${p.dt_ratio != null ? `<span>當沖率 ${fmt2(p.dt_ratio)}%</span>` : ""}
       ${p.breakeven_ticks != null ? `<span>回本約 ${p.breakeven_ticks} 檔</span>` : ""}
-      ${p.trail_dist ? `<span title="觸及停利價後改追蹤高點回落 ${fmt2(p.trail_dist)} 出場（停利價為地板）">移停 ${fmt2(p.trail_dist)}</span>` : ""}
-      ${p.tstop_bar != null ? `<span title="此時刻前未觸停利即以當時市價出場（出場價事前不可知）">時停 ${tstopTime(p.tstop_bar)}</span>` : ""}
     </div>
+    ${exitRuleHtml(p)}
     ${riskBadgeHtml(p)}
   </div>`;
 }
@@ -516,6 +529,17 @@ function renderReview() {
 
   $("#reviewList").innerHTML = [...daily].reverse().map((d, idx) => {
     const reasonTxt = { target: "停利", trail: "移動停利", stop: "停損", timeout: "時間停損", close: "收盤沖銷", nofill: "未成交" };
+    // 出場價若不是卡片上的價位，就把它是怎麼來的寫出來（移動停利=高/低點回撤、時間停損=該時刻市價）
+    const exitTxt = (p) => {
+      if (p.exit_reason === "trail" && p.trail_dist) {
+        const peak = p.side === "short" ? p.exit_price - p.trail_dist : p.exit_price + p.trail_dist;
+        return p.side === "short"
+          ? `移動停利（低點約 ${fmt2(peak)} 反彈 ${fmt2(p.trail_dist)}）`
+          : `移動停利（高點約 ${fmt2(peak)} 回落 ${fmt2(p.trail_dist)}）`;
+      }
+      if (p.exit_reason === "timeout" && p.tstop_bar != null) return `時間停損（${tstopTime(p.tstop_bar)} 市價）`;
+      return reasonTxt[p.exit_reason] || p.exit_reason;
+    };
     const rows = d.rows.map((p) => {
       const sm = p.side === "short" ? '<span class="down" title="做空">🔻</span> ' : "";
       // 當時建議的完整價位（做空鏡像：進場為賣價、突破參考為下方 AL 側；突破模式=穿越觸發追價）
@@ -558,7 +582,7 @@ function renderReview() {
         <td class="muted">(未取 ${signTxt(p._net)}${fmt(p._net)})</td></tr>`;
       }
       return `<tr><td>${nameCell}</td><td>${fmt2(p.fill_price)}</td>
-        <td>${fmt2(p.exit_price)}</td><td>${reasonTxt[p.exit_reason] || p.exit_reason}</td>
+        <td>${fmt2(p.exit_price)}</td><td>${exitTxt(p)}</td>
         <td>${m.lots} 張</td>
         <td class="${signCls(m.net)}">${signTxt(m.net)}${fmt(m.net)}</td></tr>`;
     }).join("");

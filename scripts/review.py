@@ -3,8 +3,9 @@
 模擬有兩種模式（同一套進出場規則，粒度不同）：
 
 【intraday｜5 分K 順序模擬（優先）】
-- 逐根走 5 分K：第一根「最低 ≤ 掛買價」的 bar 視為成交
-  （該根開盤已低於掛價 → 以該根開盤價成交，否則以掛價成交）。
+- 逐根走 5 分K：第一根「最低 ≤ 掛買價」的 bar 視為成交，以掛價成交；
+  唯 09:00 開盤競價（第一根）的開盤價低於掛價時以開盤價成交（集合競價可得價格改善），
+  盤中限價單不可能優於掛價（5 分K「開在掛價下方」只是該窗口首筆，連續撮合早在掛價成交你）。
 - 成交那一根：**不認停利**（同根內的高點可能發生在成交之前，吃不到），
   但認停損（既然殺到掛價，續殺到停損的機率高，保守處理）。
 - 成交之後的每一根：先檢查停損（低 ≤ stop）、再檢查停利（高 ≥ target），
@@ -101,7 +102,7 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
                     else:
                         continue
                 elif bo >= entry:
-                    fill = bo               # 開盤即高於掛賣價 → 以開盤價成交（更好的放空價）
+                    fill = bo if i == 0 else entry   # 同做多：只有開盤競價可得優於掛價的成交
                 elif (bh > entry) if strict_fill else (bh >= entry):
                     fill = entry            # 盤中漲（穿）觸掛賣價成交
                 else:
@@ -205,7 +206,9 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
                     else:
                         continue
                 elif bo <= entry:
-                    fill = bo               # 開盤即低於掛價 → 以開盤價成交（必成）
+                    # 開盤競價（第一根）可拿到優於掛價的開盤價；盤中限價單只以掛價成交——
+                    # 5 分K「開在掛價下方」是該窗口首筆成交，連續撮合早已在掛價成交你的單
+                    fill = bo if i == 0 else entry
                 elif (bl < entry) if strict_fill else (bl <= entry):
                     fill = entry            # 盤中（穿）觸掛價成交
                 else:
