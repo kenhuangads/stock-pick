@@ -85,7 +85,10 @@
   "simulation": {
     "lots_per_trade": 1,
     "strict_fill": true,
-    "gap_void": true
+    "gap_void": true,
+    "entry_cutoff_bar": 12,
+    "short_min_cushion_r": 0.5,
+    "long_min_cushion_r": 0
   },
   "risk": {
     "daily_loss_limit": 10000,

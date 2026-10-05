@@ -44,7 +44,22 @@ def audit():
                 p.get("trail_dist"), p.get("tstop_bar"),
                 strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
                 side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
-                gap_void=cfg.get("simulation", {}).get("gap_void", False))
+                gap_void=cfg.get("simulation", {}).get("gap_void", False),
+                min_cushion=p.get("min_cushion"), entry_cutoff_bar=p.get("cutoff_bar"))
+            if reason in ("cushionvoid", "expired"):
+                # 執行層規則作廢：另重放「未套規則」的原始結果，須與紀錄的 raw 一致
+                rf, rfill, rexit, rreason, _ = simulate_trade(
+                    p["entry"], p["target"], p["stop"], ohlc, bars,
+                    p.get("trail_dist"), p.get("tstop_bar"),
+                    strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
+                    side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
+                    gap_void=cfg.get("simulation", {}).get("gap_void", False))
+                raw = p.get("raw")
+                if rf:
+                    if not raw or (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (rfill, rexit, rreason):
+                        issues.append(f"{date} {p['code']} 規則作廢單的 raw 與重放不一致")
+                elif reason == "expired":
+                    reason = rreason   # 逾時但本來就不會成交 → 紀錄為一般未成交
             if (filled, fill, exitp, reason, mode) != (
                     p["filled"], p["fill_price"], p["exit_price"], p["exit_reason"], p["sim_mode"]):
                 issues.append(f"{date} {p['code']} 重放不一致："
@@ -80,7 +95,11 @@ def audit():
                     issues.append(f"{date} {p['code']} 停損出場價 {p['exit_price']} 高於停損價 {p['stop']}（未跳空卻優於停損）")
             if not p["filled"] and any(fillable(b) for b in bars):
                 gave_up = False
-                if p.get("exit_reason") == "gapvoid":
+                if p.get("exit_reason") in ("cushionvoid", "expired"):
+                    gave_up = True   # 執行層規則的合法撤單（重放一致性已於上方驗過）
+                elif p.get("cutoff_bar") is not None and not any(fillable(b) for b in bars[:p["cutoff_bar"]]):
+                    gave_up = True   # 時限內未曾觸價；時限後才觸價的不算漏成交
+                elif p.get("exit_reason") == "gapvoid":
                     # 開盤穿價作廢：合法的主動放棄——但開盤價必須真的穿過掛價
                     gave_up = (p["day_open"] > p["entry"]) if side == "short" else (p["day_open"] < p["entry"])
                     if not gave_up:

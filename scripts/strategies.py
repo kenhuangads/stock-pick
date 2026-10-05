@@ -245,7 +245,7 @@ def evaluate(m, weights, side="long"):
     return round(score, 2), hits
 
 
-def make_pick(m, score, hits, discount, price_shifts=None, side="long"):
+def make_pick(m, score, hits, discount, price_shifts=None, side="long", sim_cfg=None):
     """由 CDP＋價格模型偏移產生隔日建議買賣價（多空各用各的偏移組）。
     價位建構走 indicators.price_from_shifts（與 price_opt 重放共用、公式永不漂移）：
     revert 逆勢掛單——多：NL 掛買、NH 停利、AL 停損；空：NH 放空、NL 回補、AH 停損。
@@ -260,6 +260,10 @@ def make_pick(m, score, hits, discount, price_shifts=None, side="long"):
     entry, target, stop = price_from_shifts(c, day_range, ss, side)
     trail_mult = ss.get("trail") or 0
     tstop = ss.get("tstop")
+    # 執行層規則（跨 5 路徑類別記帳實證，2026-10-05）：隨建議單寫入、復盤依單上欄位套用
+    sim = sim_cfg or {}
+    revert = ss.get("mode", "revert") == "revert"
+    k_cush = sim.get("short_min_cushion_r" if side == "short" else "long_min_cushion_r") or 0
     return {
         "code": m["code"], "name": m["name"], "market": m["market"], "side": side,
         "close": m["close"], "chg_pct": m["chg_pct"],
@@ -268,6 +272,9 @@ def make_pick(m, score, hits, discount, price_shifts=None, side="long"):
         "entry_mode": ss.get("mode", "revert"),   # revert=逆勢掛單｜breakout=突破追價
         "trail_dist": round(trail_mult * day_range, 2) if trail_mult else None,
         "tstop_bar": tstop,
+        # 開盤緩衝下限（絕對價差）：開盤距掛價不足即作廢；掛單時限：該根（12＝10:00）後未成交即撤單
+        "min_cushion": round(k_cush * day_range, 2) if (k_cush and revert) else None,
+        "cutoff_bar": sim.get("entry_cutoff_bar"),
         "cdp_base": {"nl": c["nl"], "nh": c["nh"], "al": c["al"], "ah": c["ah"], "r": round(day_range, 2)},
         "breakeven_ticks": breakeven_ticks(entry, discount),
         "amp_avg": m["amp_avg"], "vol_lots": m["vol_lots"],
@@ -313,7 +320,7 @@ def screen(market, cfg, weights, price_shifts=None, side="long", allow_fallback=
         if not hits:
             continue
         active_hits = [h for h in hits if weights.get(h, 0) > 0]
-        p = make_pick(m, score, hits, discount, price_shifts, side)
+        p = make_pick(m, score, hits, discount, price_shifts, side, cfg.get("simulation"))
         if not tradeable_1lot(p, cfg):
             continue
         if len(active_hits) >= min_trig and score > 0:

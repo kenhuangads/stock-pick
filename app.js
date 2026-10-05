@@ -119,6 +119,23 @@ function exitRuleHtml(p) {
     parts.push(`<b>${tstopTime(p.tstop_bar)}</b> 前仍未觸及${short ? "回補價" : "停利"} → 以當時市價出場`);
   return `<div class="exit-rule">⏱ 出場規則：${parts.join("；")}。<span class="muted">這兩種出場價盤中才決定，復盤會出現卡片以外的數字。</span></div>`;
 }
+function entryRuleHtml(p) {
+  // 進場紀律（執行層規則）：開盤 09:00 與 10:00 各看一眼即可執行。
+  // 依據：5 條 walk-forward 路徑類別記帳——10:00 後才成交的單 5/5 路徑負期望；
+  // 空單開盤緩衝不足 0.5R 者 4/5 路徑負期望（0.25~0.5R 為 5/5）。
+  if (p.min_cushion == null && p.cutoff_bar == null) return "";
+  const short = p.side === "short";
+  const parts = [];
+  if (p.min_cushion) {
+    const gate = short ? p.entry - p.min_cushion : p.entry + p.min_cushion;
+    parts.push(short
+      ? `09:00 開盤價須 <b>≤ ${fmt2(Math.round(gate * 100) / 100)}</b> 才掛空單，高於此價即<b>作廢</b>（開盤離掛價太近＝反彈空間不足）`
+      : `09:00 開盤價須 <b>≥ ${fmt2(Math.round(gate * 100) / 100)}</b> 才掛買單，低於此價即<b>作廢</b>（開盤離掛價太近＝回檔空間不足）`);
+  }
+  if (p.cutoff_bar != null)
+    parts.push(`掛單只到 <b>${tstopTime(p.cutoff_bar)}</b>，屆時未成交即<b>撤單</b>（晚成交的單沒有時間發酵）`);
+  return `<div class="exit-rule entry-rule">🚦 進場紀律：${parts.join("；")}。</div>`;
+}
 function stockCard(p, rank) {
   const tags = (p.strategies || [])
     .map((id) => `<span class="tag" title="${stratMeta[id]?.desc || ""}">${stratMeta[id]?.name || id}</span>`)
@@ -167,6 +184,7 @@ function stockCard(p, rank) {
       ${p.dt_ratio != null ? `<span>當沖率 ${fmt2(p.dt_ratio)}%</span>` : ""}
       ${p.breakeven_ticks != null ? `<span>回本約 ${p.breakeven_ticks} 檔</span>` : ""}
     </div>
+    ${entryRuleHtml(p)}
     ${exitRuleHtml(p)}
     ${riskBadgeHtml(p)}
   </div>`;
@@ -550,7 +568,7 @@ function renderReview() {
         : (isBo ? { e: "⚡漲穿追買", t: "停利", s: "停損", a: "逆勢買進" }
                 : { e: "買進 NL", t: "停利 NH", s: "停損 AL", a: "突破 AH" });
       const refPx = isBo ? (p.side === "short" ? p.cdp_base?.nh : p.cdp_base?.nl) : p.ah;
-      const planLine = `<div class="plan muted small">${lb.e} ${fmt2(p.entry)}・${lb.t} ${fmt2(p.target)}・${lb.s} ${fmt2(p.stop)}${refPx != null ? `・${lb.a} ${fmt2(refPx)}` : ""}${p.trail_dist ? `・移停 ${fmt2(p.trail_dist)}` : ""}${p.tstop_bar != null ? `・時停 ${tstopTime(p.tstop_bar)}` : ""}</div>`;
+      const planLine = `<div class="plan muted small">${lb.e} ${fmt2(p.entry)}・${lb.t} ${fmt2(p.target)}・${lb.s} ${fmt2(p.stop)}${refPx != null ? `・${lb.a} ${fmt2(refPx)}` : ""}${p.trail_dist ? `・移停 ${fmt2(p.trail_dist)}` : ""}${p.tstop_bar != null ? `・時停 ${tstopTime(p.tstop_bar)}` : ""}${p.cutoff_bar != null ? `・掛單至 ${tstopTime(p.cutoff_bar)}` : ""}${p.min_cushion ? `・開盤緩衝 ≥${fmt2(p.min_cushion)}` : ""}</div>`;
       const nameCell = `${sm}${p.code} ${p.name}${planLine}`;
       if (!p.filled) {
         const reasonHypo = { target: "觸及停利", trail: "移動停利", stop: "觸及停損", timeout: "時間停損", close: "收盤沖銷" };
@@ -560,6 +578,17 @@ function renderReview() {
             : "";
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
           <td colspan="3">⚠️ 觸價未穿——排隊未必成交（保守記未成交${hypo}）</td><td>–</td></tr>`;
+        }
+        if (p.exit_reason === "cushionvoid" || p.exit_reason === "expired") {
+          const raw = p.raw;
+          const rawTxt = raw
+            ? `；若仍進場：${reasonHypo[raw.exit_reason] || raw.exit_reason} <span class="${signCls(raw.net)}">${signTxt(raw.net)}${fmt(raw.net)}</span>`
+            : "（原本也不會成交）";
+          const why = p.exit_reason === "cushionvoid"
+            ? `🚫 開盤 ${fmt2(p.day_open)} 離掛價太近（緩衝不足）——依進場紀律作廢`
+            : `⏰ ${p.cutoff_bar != null ? tstopTime(p.cutoff_bar) : ""} 前未成交——依進場紀律撤單`;
+          return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
+          <td colspan="3">${why}${rawTxt}</td><td>–</td></tr>`;
         }
         if (p.exit_reason === "gapvoid") {
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>

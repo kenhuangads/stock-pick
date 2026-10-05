@@ -68,7 +68,8 @@ def bars_match_ohlc(bars, ohlc, tol=0.005, min_bars=40):
 
 
 def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
-                    strict_fill=False, limit_up=None, entry_mode="revert", gap_void=False):
+                    strict_fill=False, limit_up=None, entry_mode="revert", gap_void=False,
+                    min_cushion=None, entry_cutoff_bar=None):
     """做空模擬（做多邏輯的鏡像）：放空掛 entry（高、逆勢賣出區），
     回補停利 target（低）、停損 stop（高）。價格上漲＝虧損方向。
     移動停利：觸及回補價後追蹤「谷底＋trail」，讓下跌的尾巴多跑；原回補價為天花板。
@@ -80,6 +81,8 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
     breakout = entry_mode == "breakout"
     if gap_void and not breakout and ohlc["o"] > entry:
         return False, None, None, "gapvoid", "intraday" if bars else "daily"
+    if min_cushion and not breakout and (entry - ohlc["o"]) < min_cushion - 1e-9:
+        return False, None, None, "cushionvoid", "intraday" if bars else "daily"   # 開盤緩衝不足
 
     def stop_px(px, bh):
         # 停損回補價修正：觸及漲停的根，市價買回最差以漲停價成交（不可能更便宜）
@@ -92,6 +95,8 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
         armed, trough = False, None   # 觸及回補價後啟動移動停利追蹤
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
+                if entry_cutoff_bar is not None and i >= entry_cutoff_bar:
+                    return False, None, None, "expired", "intraday"   # 掛單時限到：撤單
                 if breakout:
                     if bo <= entry:
                         if bo <= target:
@@ -163,7 +168,7 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
 
 def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
                    strict_fill=False, limit_dn=None, side="long", limit_up=None,
-                   entry_mode="revert", gap_void=False):
+                   entry_mode="revert", gap_void=False, min_cushion=None, entry_cutoff_bar=None):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
     side="short" 走完全鏡像的做空邏輯（放空掛高、回補在低、停損在高、漲停穿越修正）。
@@ -176,14 +181,20 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
     gap_void：逆勢掛單的「開盤穿價作廢」——開盤已越過掛價（多：開盤 < entry；空：開盤 > entry）
     即整日作廢不進場。依據：跨 10 條 walk-forward 路徑，開盤穿價成交（舊制以開盤價「更好價」成交）
     的單 9/10 路徑負期望（平均 −326/筆）——隔夜動能反向時「便宜買到」是接刀；開盤恰等於掛價仍成交。
+    min_cushion（絕對價差）：逆勢掛單的「開盤緩衝」下限——開盤價距掛價（多：開盤−掛價；空：掛價−開盤）
+    不足即作廢。entry_cutoff_bar：掛單有效時限（5分K index，12＝10:00），時限後不再成交＝撤單。
+    兩者為執行層規則（2026-10-05）：跨 5 條 walk-forward 路徑類別記帳，10:00 後成交的單 5/5 路徑負期望、
+    空單開盤緩衝 <0.5R 者 4/5 路徑負期望；僅於建議單帶有該欄位時生效（舊紀錄重放不受影響）。
     出場理由：target 停利｜trail 移動停利｜stop 停損｜timeout 時間停損｜close 收盤沖銷｜
-    nofill 未成交｜gapvoid 開盤穿價作廢。"""
+    nofill 未成交｜gapvoid 開盤穿價作廢｜cushionvoid 開盤緩衝不足作廢｜expired 逾時撤單。"""
     if side == "short":
         return _simulate_short(entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
-                               strict_fill, limit_up, entry_mode, gap_void)
+                               strict_fill, limit_up, entry_mode, gap_void, min_cushion, entry_cutoff_bar)
     breakout = entry_mode == "breakout"
     if gap_void and not breakout and ohlc["o"] < entry:
         return False, None, None, "gapvoid", "intraday" if bars else "daily"
+    if min_cushion and not breakout and (ohlc["o"] - entry) < min_cushion - 1e-9:
+        return False, None, None, "cushionvoid", "intraday" if bars else "daily"   # 開盤緩衝不足
 
     def stop_px(px, bl):
         # 停損出場價修正：觸及跌停的根，最差以跌停價成交
@@ -196,6 +207,8 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
         armed, peak = False, None   # 觸及停利價後啟動移動停利追蹤
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
+                if entry_cutoff_bar is not None and i >= entry_cutoff_bar:
+                    return False, None, None, "expired", "intraday"   # 掛單時限到：撤單
                 if breakout:
                     if bo >= entry:
                         if bo >= target:
@@ -269,6 +282,21 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
     return True, fill, ohlc["c"], "close", "daily"
 
 
+def _pnl(side, fill, exit_price, lots, fees_cfg):
+    """回傳 (gross, fees, net, ret_pct)。做空：先賣（fill）後買（exit），證交稅課在賣出＝fill 那腿。"""
+    shares = lots * 1000
+    if side == "short":
+        fee_b, fee_s, tax = trade_fees(exit_price, fill, lots, fees_cfg)
+        gross = int((fill - exit_price) * shares)
+        ret = round((fill - exit_price) / fill * 100, 2)
+    else:
+        fee_b, fee_s, tax = trade_fees(fill, exit_price, lots, fees_cfg)
+        gross = int((exit_price - fill) * shares)
+        ret = round((exit_price - fill) / fill * 100, 2)
+    fees = fee_b + fee_s + tax
+    return gross, fees, gross - fees, ret
+
+
 def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
     """回傳含成交/出場/損益的復盤紀錄。ohlc: 交易日的 {o,h,l,c}；bars: 當日 5 分K。"""
     side = pick.get("side", "long")
@@ -280,6 +308,8 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         "entry_mode": pick.get("entry_mode", "revert"),  # revert=逆勢掛單｜breakout=突破追價
         "ah": pick.get("ah"),   # 順勢突破參考價（復盤明細完整呈現當時建議的四個價位）
         "trail_dist": pick.get("trail_dist"), "tstop_bar": pick.get("tstop_bar"),
+        # 執行層規則（建議單產生時寫入；舊單無此欄位＝不套用，歷史重放口徑不變）
+        "min_cushion": pick.get("min_cushion"), "cutoff_bar": pick.get("cutoff_bar"),
         "prev_close": pick.get("close"),   # 訊號日收盤＝交易日的「前收」，供停板價/重放使用
         "cdp_base": pick.get("cdp_base"),  # 原始 CDP 價位與當日振幅，供價格模型重放迭代
         "day_open": ohlc["o"], "day_high": ohlc["h"], "day_low": ohlc["l"], "day_close": ohlc["c"],
@@ -290,15 +320,32 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
     if bars and not bars_match_ohlc(bars, ohlc):
         bars = None  # 5分K與官方日K不符（錯位/缺漏），退回日K保守模擬
     sim_cfg = sim_cfg or {}
+    base_kw = dict(strict_fill=sim_cfg.get("strict_fill", False),
+                   limit_dn=limit_down_price(pick.get("close")),
+                   side=side, limit_up=limit_up_price(pick.get("close")),
+                   entry_mode=pick.get("entry_mode", "revert"),
+                   gap_void=sim_cfg.get("gap_void", False))
     filled, fill, exit_price, reason, mode = simulate_trade(
         pick["entry"], pick["target"], pick["stop"], ohlc, bars,
         pick.get("trail_dist"), pick.get("tstop_bar"),
-        strict_fill=sim_cfg.get("strict_fill", False),
-        limit_dn=limit_down_price(pick.get("close")),
-        side=side, limit_up=limit_up_price(pick.get("close")),
-        entry_mode=pick.get("entry_mode", "revert"),
-        gap_void=sim_cfg.get("gap_void", False))
+        min_cushion=pick.get("min_cushion"), entry_cutoff_bar=pick.get("cutoff_bar"), **base_kw)
     r["sim_mode"], r["exit_reason"] = mode, reason
+    if reason in ("cushionvoid", "expired"):
+        # 執行層規則作廢的單：另存「未套規則」的原始模擬結果（raw）。
+        # 學習迴路（策略汰弱留強）仍以 raw 累積樣本——規則只決定「實際做不做」，
+        # 不讓學習端因樣本驟減而失真；復盤損益則只計實際進場的單。
+        rf, rfill, rexit, rreason, _ = simulate_trade(
+            pick["entry"], pick["target"], pick["stop"], ohlc, bars,
+            pick.get("trail_dist"), pick.get("tstop_bar"), **base_kw)
+        if rf:
+            g, fe, nt, rp = _pnl(side, rfill, rexit, lots, fees_cfg)
+            r["raw"] = {"filled": True, "fill_price": rfill, "exit_price": rexit,
+                        "exit_reason": rreason, "net": nt, "ret_pct": rp}
+            return r
+        if reason == "cushionvoid":
+            return r               # 開盤即撤單（即使原本也不會成交，當天實際動作就是作廢）
+        reason = rreason           # 逾時撤單但本來就不會成交 → 視為一般未成交
+        r["exit_reason"] = reason
     if not filled:
         # 「觸價未穿」誠實標註：價格恰好觸及掛價但未穿越——排隊前段可能成交、
         # 後段買不到（不確定成交）。保守口徑仍記未成交（防逆選擇灌水），
@@ -319,20 +366,7 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
                                           / h_fill * 100, 2)
         return r
     r["filled"], r["fill_price"], r["exit_price"] = True, fill, exit_price
-
-    shares = lots * 1000
-    if side == "short":
-        # 做空：先賣（fill）後買（exit）。毛利 =（賣−買）；證交稅課在賣出＝fill 那腿
-        fee_b, fee_s, tax = trade_fees(exit_price, fill, lots, fees_cfg)
-        gross = int((fill - exit_price) * shares)
-        r["ret_pct"] = round((fill - exit_price) / fill * 100, 2)
-    else:
-        fee_b, fee_s, tax = trade_fees(fill, exit_price, lots, fees_cfg)
-        gross = int((exit_price - fill) * shares)
-        r["ret_pct"] = round((exit_price - fill) / fill * 100, 2)
-    r["gross"] = gross
-    r["fees"] = fee_b + fee_s + tax
-    r["net"] = gross - r["fees"]
+    r["gross"], r["fees"], r["net"], r["ret_pct"] = _pnl(side, fill, exit_price, lots, fees_cfg)
     return r
 
 
@@ -359,6 +393,7 @@ def run_review(picks_doc, trade_snapshot, cfg, intraday=None):
             "n_filled": len(filled),
             "n_wins": len(wins),
             "n_intraday": sum(1 for r in results if r["sim_mode"] == "intraday"),
+            "n_rulevoid": sum(1 for r in results if r["exit_reason"] in ("cushionvoid", "expired")),
             "win_rate": round(len(wins) / len(filled) * 100, 1) if filled else None,
             "gross": sum(r["gross"] for r in filled),
             "fees": sum(r["fees"] for r in filled),

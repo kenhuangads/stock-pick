@@ -19,10 +19,13 @@ def strategy_stats(reviews, window_days):
     stats = {s["id"]: {"trades": 0, "wins": 0, "net_sum": 0, "cost_sum": 0.0} for s in STRATEGIES}
     for day in window:
         for r in day["picks"]:
+            # 被執行層規則（開盤緩衝/掛單時限）作廢的單以 raw（未套規則的原始模擬）計——
+            # 規則決定「實際做不做」，策略好壞仍以完整樣本評估，避免學習端樣本驟減
+            rec, r = r, (r.get("raw") or r)
             if not r["filled"]:
                 continue
             cost = r["fill_price"] * 1000
-            for sid in r["strategies"]:
+            for sid in rec["strategies"]:
                 if sid not in stats:
                     continue
                 st = stats[sid]
