@@ -45,7 +45,8 @@ def audit():
                 strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
                 side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
                 gap_void=cfg.get("simulation", {}).get("gap_void", False),
-                min_cushion=p.get("min_cushion"), entry_cutoff_bar=p.get("cutoff_bar"))
+                min_cushion=p.get("min_cushion"), entry_cutoff_bar=p.get("cutoff_bar"),
+                tstop_cond=bool(p.get("tstop_cond")))
             if reason in ("cushionvoid", "expired"):
                 # 執行層規則作廢：另重放「未套規則」的原始結果，須與紀錄的 raw 一致
                 rf, rfill, rexit, rreason, _ = simulate_trade(
@@ -53,7 +54,8 @@ def audit():
                     p.get("trail_dist"), p.get("tstop_bar"),
                     strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
                     side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
-                    gap_void=cfg.get("simulation", {}).get("gap_void", False))
+                    gap_void=cfg.get("simulation", {}).get("gap_void", False),
+                    tstop_cond=bool(p.get("tstop_cond")))
                 raw = p.get("raw")
                 if rf:
                     if not raw or (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (rfill, rexit, rreason):

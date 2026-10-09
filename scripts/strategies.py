@@ -275,6 +275,7 @@ def make_pick(m, score, hits, discount, price_shifts=None, side="long", sim_cfg=
         # 開盤緩衝下限（絕對價差）：開盤距掛價不足即作廢；掛單時限：該根（12＝10:00）後未成交即撤單
         "min_cushion": round(k_cush * day_range, 2) if (k_cush and revert) else None,
         "cutoff_bar": sim.get("entry_cutoff_bar"),
+        "tstop_cond": True if (sim.get("tstop_conditional") and tstop is not None) else None,
         "cdp_base": {"nl": c["nl"], "nh": c["nh"], "al": c["al"], "ah": c["ah"], "r": round(day_range, 2)},
         "breakeven_ticks": breakeven_ticks(entry, discount),
         "amp_avg": m["amp_avg"], "vol_lots": m["vol_lots"],

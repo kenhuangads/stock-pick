@@ -69,7 +69,7 @@ def bars_match_ohlc(bars, ohlc, tol=0.005, min_bars=40):
 
 def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
                     strict_fill=False, limit_up=None, entry_mode="revert", gap_void=False,
-                    min_cushion=None, entry_cutoff_bar=None):
+                    min_cushion=None, entry_cutoff_bar=None, tstop_cond=False):
     """做空模擬（做多邏輯的鏡像）：放空掛 entry（高、逆勢賣出區），
     回補停利 target（低）、停損 stop（高）。價格上漲＝虧損方向。
     移動停利：觸及回補價後追蹤「谷底＋trail」，讓下跌的尾巴多跑；原回補價為天花板。
@@ -93,6 +93,7 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
     if bars:
         fill = None
         armed, trough = False, None   # 觸及回補價後啟動移動停利追蹤
+        be_set = False                  # 條件式時停：已把停損移到成交價（保本）
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
                 if entry_cutoff_bar is not None and i >= entry_cutoff_bar:
@@ -128,8 +129,11 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
                             return True, fill, level, "trail", "intraday"
                     else:
                         return True, fill, target, "target", "intraday"
-                elif tstop_bar is not None and i >= tstop_bar:
-                    return True, fill, bc, "timeout", "intraday"
+                elif tstop_bar is not None and i >= tstop_bar and not be_set:
+                    if tstop_cond and bc < fill:
+                        stop, be_set = min(stop, fill), True   # 獲利中：停損移到成交價續抱
+                    else:
+                        return True, fill, bc, "timeout", "intraday"
             else:
                 level = min(target, trough + trail_dist)   # 原回補價為天花板
                 if bo >= level:
@@ -168,7 +172,8 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
 
 def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
                    strict_fill=False, limit_dn=None, side="long", limit_up=None,
-                   entry_mode="revert", gap_void=False, min_cushion=None, entry_cutoff_bar=None):
+                   entry_mode="revert", gap_void=False, min_cushion=None, entry_cutoff_bar=None,
+                   tstop_cond=False):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
     side="short" 走完全鏡像的做空邏輯（放空掛高、回補在低、停損在高、漲停穿越修正）。
@@ -183,13 +188,17 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
     的單 9/10 路徑負期望（平均 −326/筆）——隔夜動能反向時「便宜買到」是接刀；開盤恰等於掛價仍成交。
     min_cushion（絕對價差）：逆勢掛單的「開盤緩衝」下限——開盤價距掛價（多：開盤−掛價；空：掛價−開盤）
     不足即作廢。entry_cutoff_bar：掛單有效時限（5分K index，12＝10:00），時限後不再成交＝撤單。
+    tstop_cond：條件式時間停損——時限到時「獲利中」的單不出場，改把停損移到成交價（保本）續抱，
+    照原停利／移動停利規則出場；未獲利者照舊以該根收盤出場。依據：5 路徑 705 筆時停單反事實重放，
+    虧損中續抱 4/5 路徑更差、獲利中改保本續抱 4/5 路徑更好（+60,999）。
     兩者為執行層規則（2026-10-05）：跨 5 條 walk-forward 路徑類別記帳，10:00 後成交的單 5/5 路徑負期望、
     空單開盤緩衝 <0.5R 者 4/5 路徑負期望；僅於建議單帶有該欄位時生效（舊紀錄重放不受影響）。
     出場理由：target 停利｜trail 移動停利｜stop 停損｜timeout 時間停損｜close 收盤沖銷｜
     nofill 未成交｜gapvoid 開盤穿價作廢｜cushionvoid 開盤緩衝不足作廢｜expired 逾時撤單。"""
     if side == "short":
         return _simulate_short(entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
-                               strict_fill, limit_up, entry_mode, gap_void, min_cushion, entry_cutoff_bar)
+                               strict_fill, limit_up, entry_mode, gap_void, min_cushion, entry_cutoff_bar,
+                               tstop_cond)
     breakout = entry_mode == "breakout"
     if gap_void and not breakout and ohlc["o"] < entry:
         return False, None, None, "gapvoid", "intraday" if bars else "daily"
@@ -205,6 +214,7 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
     if bars:
         fill = None
         armed, peak = False, None   # 觸及停利價後啟動移動停利追蹤
+        be_set = False                # 條件式時停：已把停損移到成交價（保本）
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
                 if entry_cutoff_bar is not None and i >= entry_cutoff_bar:
@@ -244,8 +254,11 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
                             return True, fill, level, "trail", "intraday"
                     else:
                         return True, fill, target, "target", "intraday"
-                elif tstop_bar is not None and i >= tstop_bar:
-                    return True, fill, bc, "timeout", "intraday"
+                elif tstop_bar is not None and i >= tstop_bar and not be_set:
+                    if tstop_cond and bc > fill:
+                        stop, be_set = max(stop, fill), True   # 獲利中：停損移到成交價續抱
+                    else:
+                        return True, fill, bc, "timeout", "intraday"
             else:
                 level = max(target, peak - trail_dist)   # 原停利價為地板
                 if bo <= level:
@@ -310,6 +323,7 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         "trail_dist": pick.get("trail_dist"), "tstop_bar": pick.get("tstop_bar"),
         # 執行層規則（建議單產生時寫入；舊單無此欄位＝不套用，歷史重放口徑不變）
         "min_cushion": pick.get("min_cushion"), "cutoff_bar": pick.get("cutoff_bar"),
+        "tstop_cond": pick.get("tstop_cond"),
         "prev_close": pick.get("close"),   # 訊號日收盤＝交易日的「前收」，供停板價/重放使用
         "cdp_base": pick.get("cdp_base"),  # 原始 CDP 價位與當日振幅，供價格模型重放迭代
         "day_open": ohlc["o"], "day_high": ohlc["h"], "day_low": ohlc["l"], "day_close": ohlc["c"],
@@ -324,7 +338,8 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
                    limit_dn=limit_down_price(pick.get("close")),
                    side=side, limit_up=limit_up_price(pick.get("close")),
                    entry_mode=pick.get("entry_mode", "revert"),
-                   gap_void=sim_cfg.get("gap_void", False))
+                   gap_void=sim_cfg.get("gap_void", False),
+                   tstop_cond=bool(pick.get("tstop_cond")))
     filled, fill, exit_price, reason, mode = simulate_trade(
         pick["entry"], pick["target"], pick["stop"], ohlc, bars,
         pick.get("trail_dist"), pick.get("tstop_bar"),
