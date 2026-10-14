@@ -220,6 +220,7 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
         grid_tstop = pcfg.get("tstop_grid", [None])
         modes = pcfg.get("entry_modes") or ["revert"]
         min_payoff = pcfg.get("min_payoff", 1.2)
+        payoff_hard = pcfg.get("payoff_hard", False)   # 賺賠比門檻改為硬約束（見 _select）
         grids = {"entry": grid_entry, "target": grid_exit, "stop": grid_stop,
                  "trail": grid_trail, "tstop": grid_tstop}
         scored = []
@@ -247,7 +248,15 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
                 positive = [x for x in qual if x[1]["net"] > 0]
                 if objective == "payoff" and positive:
                     good = [x for x in positive if _payoff(x[1]) >= min_payoff]
-                    picked = sorted(good or positive, key=lambda x: (-x[1]["net"], x[2]))[0]
+                    if good:
+                        picked = sorted(good, key=lambda x: (-x[1]["net"], x[2]))[0]
+                    elif payoff_hard:
+                        # 硬約束：無組合達標賺賠比時，退而選「賺賠比最高」而非「淨損益最高」——
+                        # 軟偏好會為了窗口淨值接受賺賠比 0.8 的結構（停利貼進場、停損遠），
+                        # 2026-10 實況：窗口賺賠比 0.86/0.89、名目停利/停損距離比 0.1~0.3
+                        picked = sorted(positive, key=lambda x: (-min(_payoff(x[1]), 9.0), -x[1]["net"], x[2]))[0]
+                    else:
+                        picked = sorted(positive, key=lambda x: (-x[1]["net"], x[2]))[0]
                 elif objective == "winrate" and positive:
                     picked = sorted(positive, key=lambda x: (-win_rate(x[1]), -x[1]["net"], x[2]))[0]
                 else:  # objective=net 或無任一正期望值 → 取總淨損益最大（保本）
@@ -286,6 +295,10 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
                 if objective == "payoff" and not switch and best_q and cur_q:
                     # 賺賠比從不及格→及格且不明顯犧牲期望值 → 換（大賺小賠結構優先）
                     switch = (_payoff(best_st) >= min_payoff > _payoff(cur)
+                              and best_st["net"] > 0 and best_st["net"] >= cur["net"] - margin)
+                if payoff_hard and objective == "payoff" and not switch and best_q and cur_q:
+                    # 硬約束模式：兩者皆未達標時，賺賠比明顯更好且不明顯犧牲淨值 → 換
+                    switch = (_payoff(cur) < min_payoff and _payoff(best_st) >= _payoff(cur) + 0.05
                               and best_st["net"] > 0 and best_st["net"] >= cur["net"] - margin)
             if switch:
                 adopt_sh, adopt_st = best_sh, best_st
