@@ -52,8 +52,9 @@ def audit():
         n_taken += taken
         if rec.get("state") != "open" and sigs:
             issues.append(f"{d} 閘門未開啟（{rec.get('state')}）卻有 {len(sigs)} 筆訊號")
-        if rec.get("open_before") is not None and taken + rec["open_before"] > scfg["max_positions"]:
-            issues.append(f"{d} 取用 {taken} 筆＋既有持倉 {rec['open_before']} 超過上限 {scfg['max_positions']}")
+        cap = rec.get("cap") or scfg["max_positions"]
+        if rec.get("open_before") is not None and taken + rec["open_before"] > cap:
+            issues.append(f"{d} 取用 {taken} 筆＋既有持倉 {rec['open_before']} 超過上限 {cap}（{rec.get('tier')}）")
     for r in state.get("unfilled", []):
         if r.get("reason") == "limitup" and not (r["open_next"] >= r["limit_up"] - 1e-9):
             issues.append(f"{r['signal_date']} {r['code']} 標記漲停買不到但開盤 {r['open_next']} < 漲停 {r['limit_up']}")

@@ -49,6 +49,7 @@ DEFAULT_CFG = {
     },
     "exit": {"stop_pct": 7, "target_pct": 15, "min_hold_days": 5, "max_hold_days": 10},
     "max_positions": 20,
+    "t2_max_positions": 30,
     "position_pct": 5,
     "lots": 1,
     "dedup_days": 10,
@@ -342,7 +343,10 @@ def process(cfg, snaps, days, allow_new=True):
                     s["rank"] = k
                 brk = breaker_active(i, tier)
                 rec["breaker"] = brk
-                free = max(0, scfg["max_positions"] - len(open_at(i)))
+                # 槽位上限：一般日 max_positions；反彈確認日（T2）可擴到 t2_max_positions（不低於一般上限）
+                cap = max(scfg["max_positions"], scfg["t2_max_positions"]) if tier == "T2" else scfg["max_positions"]
+                rec["cap"] = cap
+                free = max(0, cap - len(open_at(i)))
                 slot = 0
                 for s in sigs:
                     s["blocked"] = bool(brk and scfg["breaker"]["block_entries"])
@@ -390,6 +394,7 @@ def process(cfg, snaps, days, allow_new=True):
                              "remaining_days": max(0, (s.get("rules") or scfg["exit"])["max_hold_days"] - r["days"])})
         return base
 
+    peak_open = max((len(open_at(i)) for i in range(n)), default=0)   # 最高同時持倉（資金需求）
     closed = [row(x) for x in taken if x["res"]["status"] == "closed"]
     positions = [row(x) for x in taken if x["res"]["status"] == "open"]
     pending = [row(x) for x in taken if x["res"]["status"] == "pending"]
@@ -419,6 +424,7 @@ def process(cfg, snaps, days, allow_new=True):
                        "days": [{"date": dates[i], "tier": days[dates[i]]["tier"], "mkt5": days[dates[i]]["mkt5"],
                                  "ew": days[dates[i]]["ew"], "n_signals": len(days[dates[i]]["signals"]),
                                  "n_taken": sum(1 for s in days[dates[i]]["signals"] if s.get("taken")),
+                                 "cap": days[dates[i]].get("cap"), "open_before": days[dates[i]].get("open_before"),
                                  "breaker": days[dates[i]].get("breaker", False)} for i in e["idxs"]],
                        "n_signals": n_sig, "n_taken": len(rows_e),
                        "n_unfilled": sum(r["status"] == "unfilled" for r in rows_e),
@@ -436,7 +442,8 @@ def process(cfg, snaps, days, allow_new=True):
         "generated_on": dates[-1], "updated_at": datetime.now(TAIPEI).isoformat(timespec="seconds"),
         "gauge": {"date": dates[-1], "mkt5": hist[-1]["mkt5"], "ew": hist[-1]["ew"], "breadth5": hist[-1]["breadth5"],
                   "state": g_state, "tier": g_tier, "breaker": today.get("breaker", False),
-                  "open_positions": len(positions), "max_positions": scfg["max_positions"]},
+                  "open_positions": len(positions), "max_positions": scfg["max_positions"],
+                  "cap_today": today.get("cap") or scfg["max_positions"]},
         "history": hist,
         "today": {"date": today["date"], "state": today.get("state"), "tier": today.get("tier"),
                   "breaker": today.get("breaker", False), "signals": today.get("signals", [])},
@@ -446,8 +453,9 @@ def process(cfg, snaps, days, allow_new=True):
         "unfilled": sorted(unf, key=lambda r: r["signal_date"], reverse=True)[:60],
         "events": ev_out[::-1],
         "summary": {**stats(closed), "n_events": len(ev_out), "n_gate_days": len(gate_days),
-                    "n_taken": len(taken), "n_unfilled": len(unf), "n_open": len(positions)},
+                    "n_taken": len(taken), "n_unfilled": len(unf), "n_open": len(positions), "peak_open": peak_open},
         "rules": {"gate": scfg["gate"], "exit": scfg["exit"], "max_positions": scfg["max_positions"],
+                  "t2_max_positions": max(scfg["max_positions"], scfg["t2_max_positions"]),
                   "position_pct": scfg["position_pct"], "lots": lots, "setups": SETUP_META,
                   "breaker": scfg["breaker"], "dedup_days": scfg["dedup_days"]},
     }

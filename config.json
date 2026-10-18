@@ -148,6 +148,7 @@
       "max_hold_days": 10
     },
     "max_positions": 20,
+    "t2_max_positions": 30,
     "position_pct": 5,
     "lots": 1,
     "dedup_days": 10,
