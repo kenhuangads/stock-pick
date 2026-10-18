@@ -30,7 +30,7 @@ function sideNet(side, fill, exit, lots) {
 }
 
 /* ---------- 資料載入 ---------- */
-let DB = { picks: null, market: null, reviews: null, strategies: null, priceModel: null, config: null };
+let DB = { picks: null, market: null, reviews: null, strategies: null, priceModel: null, config: null, swing: null };
 let stratMeta = {}; // id -> {name, desc, candidate}
 
 async function loadJSON(path) {
@@ -49,7 +49,8 @@ async function boot() {
     ]);
     const priceModel = await loadJSON("data/latest/price_model.json").catch(() => null); // 舊部署可能還沒有
     const config = await loadJSON("data/latest/config_snapshot.json").catch(() => null);   // 風控預設值
-    DB = { picks, market, reviews, strategies, priceModel, config };
+    const swing = await loadJSON("data/swing/state.json").catch(() => null);               // 波段模組（崩跌反彈）
+    DB = { picks, market, reviews, strategies, priceModel, config, swing };
     (market.strategies || []).forEach((s) => (stratMeta[s.id] = s));
     Object.entries(strategies.meta || {}).forEach(([id, m]) => (stratMeta[id] = { id, ...m }));
     $("#dataDate").textContent = `資料日：${market.date} · 更新：${(market.updated_at || "").slice(0, 16).replace("T", " ")}`;
@@ -58,6 +59,7 @@ async function boot() {
     renderReview();
     renderPriceModel();
     renderStrategies();
+    renderSwing();
   } catch (e) {
     $("#dataDate").textContent = "資料載入失敗";
     $("#picksInfo").innerHTML = `⚠️ 尚無資料或載入失敗（${e.message}）。首次部署請先執行資料回補 Workflow。`;
@@ -739,6 +741,167 @@ function renderStrategies() {
   $("#evolveLog").innerHTML = log.length
     ? [...log].reverse().slice(0, 30).map((l) => `<div class="log-item"><span class="d">${l.date}</span>${l.msg}</div>`).join("")
     : "尚無調整紀錄（樣本累積中，策略達 8 筆成交後開始評估）";
+}
+
+
+/* ---------- 波段（崩跌反彈波段模組） ---------- */
+// 研究依據 docs/swing_research.md：持股 ≥1 週、+15% 的機會集中在「市場急跌後的反彈日」；
+// 平時所有動能／突破型態皆無正期望，故模組平時待命、只在閘門開啟日產單。
+let swingChart = null;
+const pctTxt = (v, d = 2) => (v == null ? "–" : `${v > 0 ? "+" : ""}${Number(v).toFixed(d)}%`);
+const SWING_REASON = {
+  target: "✅ 停利", stop: "🛑 停損", stop_lock: "🛑 跌停延後停損", time: "⏱ 時間出場",
+  limitup: "⛔ 開盤漲停買不到", nobar: "⛔ 無交易", open: "📌 持有中", pending: "🕘 待隔日開盤進場",
+};
+function swingSetupBadge(s) {
+  const R = DB.swing.rules.setups || {};
+  return (s.setups || [s.setup]).map((k) => `<span class="badge setup" title="${(R[k] || {}).desc || ""}">${(R[k] || {}).name || k}</span>`).join(" ");
+}
+function swingSignalCard(s, rules) {
+  const ex = s.rules || rules.exit;
+  const taken = s.taken;
+  const badge = s.blocked ? `<span class="badge off">🚧 斷路器暫停</span>`
+    : taken ? `<span class="badge taken">✅ 建議進場</span>` : `<span class="badge wait">候補（槽位已滿）</span>`;
+  return `<div class="card${taken ? "" : " dim"}">
+    <div class="head"><span class="rank">#${s.rank}</span><span class="code">${s.code}</span><span class="name">${s.name}</span>
+      <span class="mkt">${s.market === "tpex" ? "上櫃" : "上市"}</span>${badge}</div>
+    <div class="px">收盤 <b>${fmt2(s.close)}</b> <span class="${signCls(s.chg_pct)}">${pctTxt(s.chg_pct)}</span></div>
+    <div class="tags">${swingSetupBadge(s)}
+      <span class="tag">離 60 日高 ${s.drawdown_pct == null ? "–" : "−" + Number(s.drawdown_pct).toFixed(1) + "%"}${s.hi_days < 60 ? `（僅 ${s.hi_days} 日資料）` : ""}</span>
+      <span class="tag">5 日 ${pctTxt(s.drop5_pct, 1)}</span>
+      <span class="tag">20 日均成交值 ${(s.val_ma / 1e8).toFixed(1)} 億</span></div>
+    <div class="price-grid g3">
+      <div><div class="lb">開盤價上限（漲停）</div><div class="v ah">${fmt2(s.limit_up_next)}</div></div>
+      <div><div class="lb">參考停損（−${ex.stop_pct}%）</div><div class="v sl">${fmt2(s.ref_stop)}</div></div>
+      <div><div class="lb">參考停利（+${ex.target_pct}%）</div><div class="v tp">${fmt2(s.ref_target)}</div></div>
+    </div>
+    <div class="exit-rule">📋 執行：隔日 09:00 <b>開盤市價買進</b>；開盤價 ≥ <b>${fmt2(s.limit_up_next)}</b>（漲停）即<b>放棄</b>。
+      成交後停損 = 成交價 −${ex.stop_pct}%（跳空以開盤價出場、跌停鎖死順延次日開盤）；
+      <b>第 ${ex.min_hold_days} 日起</b>觸及成交價 +${ex.target_pct}% 停利；第 ${ex.max_hold_days} 日收盤未出場則<b>市價出場</b>。
+      <span class="muted">參考價以今日收盤推算，實際以成交價為準。</span></div>
+  </div>`;
+}
+function swingTradesTable(rows) {
+  const tr = rows.map((t) => {
+    const st = t.status;
+    const exitTxt = st === "closed" ? `${fmt2(t.exit)}<div class="plan muted">${t.exit_date}</div>`
+      : st === "open" ? `${fmt2(t.last)}<div class="plan muted">${t.last_date} 現價</div>` : "–";
+    const ret = st === "closed" || st === "open" ? `<span class="${signCls(t.ret_pct)}">${pctTxt(t.ret_pct)}</span>` : "–";
+    const reason = st === "closed" ? SWING_REASON[t.reason] || t.reason
+      : st === "unfilled" ? (SWING_REASON[t.reason] || t.reason) + (t.open_next != null ? `<div class="plan muted">開 ${fmt2(t.open_next)} ≥ 漲停 ${fmt2(t.limit_up)}</div>` : "")
+      : SWING_REASON[st];
+    return `<tr class="${st === "unfilled" ? "dim" : ""}">
+      <td class="lf"><b>${t.code}</b> ${t.name}<div class="plan muted">${(t.setups || [t.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
+      <td>${t.signal_date}</td>
+      <td>${t.fill != null ? fmt2(t.fill) : "–"}${t.fill_date && t.fill != null ? `<div class="plan muted">${t.fill_date}</div>` : ""}</td>
+      <td>${exitTxt}</td>
+      <td class="lf">${reason}</td>
+      <td>${t.days != null ? t.days : "–"}</td>
+      <td>${ret}</td>
+      <td class="${st === "closed" ? signCls(t.net) : ""}">${st === "closed" ? signTxt(t.net) + fmt(t.net) : "–"}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="tbl-wrap"><table class="trades">
+    <thead><tr><th class="lf">股票／型態</th><th>訊號日</th><th>成交</th><th>出場／現價</th><th class="lf">結果</th><th>持有日</th><th>報酬</th><th>1 張淨損益</th></tr></thead>
+    <tbody>${tr}</tbody></table></div>`;
+}
+function swingStatCards(st, extra = "") {
+  if (!st || !st.n_closed) return `<div class="stat"><div class="lb">已平倉</div><div class="v">0 筆</div></div>${extra}`;
+  return `<div class="stat"><div class="lb">已平倉</div><div class="v">${st.n_closed} 筆</div></div>
+    <div class="stat"><div class="lb">勝率 / 達標率</div><div class="v">${st.win_rate}% / ${st.hit_rate}%</div></div>
+    <div class="stat"><div class="lb">單筆平均</div><div class="v ${signCls(st.mean_ret_pct)}">${pctTxt(st.mean_ret_pct)}</div></div>
+    <div class="stat"><div class="lb">權益貢獻（每檔 ${DB.swing.rules.position_pct}%）</div><div class="v ${signCls(st.contrib_pct)}">${pctTxt(st.contrib_pct)}</div></div>${extra}`;
+}
+function renderSwing() {
+  const sw = DB.swing;
+  const gauge = $("#swingGauge"), todayBox = $("#swingToday"), posBox = $("#swingPositions");
+  const sumBox = $("#swingSummary"), evBox = $("#swingEvents"), explain = $("#swingExplain");
+  if (!sw) {
+    gauge.innerHTML = "";
+    todayBox.innerHTML = `<div class="empty">尚無波段資料（下一次每日更新後產生）</div>`;
+    return;
+  }
+  const g = sw.gauge, R = sw.rules, G = R.gate, EX = R.exit;
+  const meta = { open: ["🟢", "閘門開啟", "open"], warn: ["🟡", "預警", "warn"], idle: ["⚪", "待命", "idle"], na: ["–", "資料不足", "idle"] };
+  const [ico, txt, cls] = meta[g.state] || meta.na;
+  gauge.innerHTML = `
+    <div class="stat"><div class="lb">等權 5 日報酬</div><div class="v ${signCls(g.mkt5)}">${pctTxt(g.mkt5)}</div></div>
+    <div class="stat"><div class="lb">當日等權</div><div class="v ${signCls(g.ew)}">${pctTxt(g.ew)}</div></div>
+    <div class="stat"><div class="lb">漲跌家數寬度 5MA</div><div class="v">${g.breadth5 == null ? "–" : Number(g.breadth5).toFixed(2)}</div></div>
+    <div class="stat gauge-${cls}"><div class="lb">閘門（${g.date}）</div><div class="v">${ico} ${txt}${g.tier ? ` <span class="badge tier">${g.tier}</span>` : ""}</div></div>`;
+
+  // 壓力計走勢圖：等權 5 日報酬 vs 閘門門檻
+  chartWhenVisible("swing", () => {
+    const ctx = $("#swingChart");
+    if (swingChart) swingChart.destroy();
+    const H = sw.history.filter((h) => h.mkt5 != null);
+    swingChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: H.map((h) => h.date.slice(5)),
+        datasets: [
+          { label: "等權 5 日報酬 %", data: H.map((h) => h.mkt5), borderColor: "#4da3ff", backgroundColor: "rgba(77,163,255,.15)", fill: true, tension: .25, pointRadius: H.map((h) => (h.state === "open" ? 4 : 0)), pointBackgroundColor: "#2ecc71" },
+          { label: `T1 門檻 ${G.mkt5_le}%`, data: H.map(() => G.mkt5_le), borderColor: "rgba(255,93,82,.8)", borderDash: [6, 4], pointRadius: 0, borderWidth: 1 },
+          { label: `預警 ${G.warn_mkt5_le}%`, data: H.map(() => G.warn_mkt5_le), borderColor: "rgba(245,192,78,.8)", borderDash: [4, 4], pointRadius: 0, borderWidth: 1 },
+        ],
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: "#93a4b8", boxWidth: 10 } } },
+        scales: { x: { ticks: { color: "#93a4b8", maxTicksLimit: 8 }, grid: { color: "#2a3342" } }, y: { ticks: { color: "#93a4b8" }, grid: { color: "#2a3342" } } } },
+    });
+  });
+
+  // 今日建議單
+  const T = sw.today;
+  const takenN = T.signals.filter((s) => s.taken).length;
+  const gateRule = `閘門規則：等權 5 日報酬 ≤ ${G.mkt5_le}%（T1 深跌），或 ≤ ${G.mkt5_le_rebound}% 且當日 ≥ +${G.rebound_day_ge}%（T2 反彈確認）。`;
+  if (T.state === "open") {
+    todayBox.innerHTML = `<div class="notice">🟢 <b>${T.date} 閘門開啟（${T.tier === "T2" ? "T2 反彈確認日" : "T1 深跌"}）</b>：以下為<b>隔日開盤市價買進</b>的波段建議單，
+      共 ${T.signals.length} 檔，依「離 60 日高深度」排序，取前 ${takenN} 檔（槽位 ${g.open_positions}/${g.max_positions} 已用），其餘候補。
+      ${T.breaker ? `<br>🚧 斷路器：本事件最近兩批進場多數停損${R.breaker.block_entries ? "，已暫停 T1 新單" : "（僅提醒，未阻擋）"}。` : ""}
+      <br><span class="small">${gateRule}</span></div>
+      <div class="cards">${T.signals.map((s) => swingSignalCard(s, R)).join("")}</div>`;
+  } else {
+    const warn = T.state === "warn" ? `🟡 <b>預警</b>：等權 5 日已跌 ${pctTxt(g.mkt5)}，接近閘門。` : "";
+    todayBox.innerHTML = `<div class="notice">${warn || "⚪ <b>待命</b>：閘門未開啟，今日沒有波段建議單。"}
+      模組只在市場急跌後的反彈日產單（3 年實證平時所有型態皆無正期望）。<br><span class="small">${gateRule}</span></div>`;
+  }
+
+  // 持倉
+  const P = sw.positions || [];
+  posBox.innerHTML = `<h3 class="swing-h3">📌 模擬持倉（${P.length}/${g.max_positions}）</h3>` +
+    (P.length ? swingTradesTable(P) +
+      `<div class="notice small">持倉規則：停損 ${P.map((p) => `${p.code} ${fmt2(p.stop)}`).join("、")}；
+       第 ${EX.min_hold_days} 日起停利 ${P.map((p) => `${p.code} ${fmt2(p.target)}`).join("、")}；最多持有 ${EX.max_hold_days} 日。
+       ${P.some((p) => p.lock) ? "⚠️ 有部位跌停鎖死，依規則次日開盤出場。" : ""}</div>`
+      : `<div class="notice small">目前無持倉。</div>`);
+
+  // 總覽與事件
+  const S = sw.summary || {};
+  sumBox.innerHTML = swingStatCards(S, `<div class="stat"><div class="lb">事件 / 閘門日</div><div class="v">${S.n_events || 0} / ${S.n_gate_days || 0}</div></div>`);
+  const EV = sw.events || [];
+  evBox.innerHTML = EV.length ? EV.map((e, i) => {
+    const st = e.stats || {};
+    const line = st.n_closed ? `勝率 ${st.win_rate}%・達標 ${st.hit_rate}%・單筆均 <span class="${signCls(st.mean_ret_pct)}">${pctTxt(st.mean_ret_pct)}</span>・權益貢獻 <span class="${signCls(st.contrib_pct)}">${pctTxt(st.contrib_pct)}</span>` : "尚未平倉";
+    const dayRows = e.days.map((d) => `<tr><td class="lf">${d.date}</td><td>${d.tier}</td><td class="${signCls(d.mkt5)}">${pctTxt(d.mkt5)}</td><td class="${signCls(d.ew)}">${pctTxt(d.ew)}</td><td>${d.n_signals}</td><td>${d.n_taken}</td><td class="lf">${d.breaker ? "🚧" : ""}</td></tr>`).join("");
+    return `<details class="day-block"${i === 0 ? " open" : ""}>
+      <summary><span class="d">事件 #${e.id} ${e.start}${e.end !== e.start ? ` ～ ${e.end}` : ""}</span>
+        <span class="s">閘門 ${e.days.length} 日・訊號 ${e.n_signals}・進場 ${e.n_taken}（買不到 ${e.n_unfilled}）</span>
+        <span class="pnl ${signCls(st.contrib_pct)}">${st.n_closed ? pctTxt(st.contrib_pct) : ""}</span></summary>
+      <div class="notice small" style="margin:0 10px 10px">${line}${st.n_closed ? `・持有 ≥5 日 ${st.hold5_rate}%・1 張合計 <span class="${signCls(st.net_ntd)}">${signTxt(st.net_ntd)}${fmt(st.net_ntd)}</span>` : ""}</div>
+      <div class="tbl-wrap"><table class="trades"><thead><tr><th class="lf">閘門日</th><th>層級</th><th>等權 5 日</th><th>當日</th><th>訊號</th><th>取用</th><th class="lf"></th></tr></thead><tbody>${dayRows}</tbody></table></div>
+      ${swingTradesTable(e.trades)}
+    </details>`;
+  }).join("") : `<div class="empty">尚無事件（資料期間內市場未出現急跌）。</div>`;
+
+  explain.innerHTML = `
+    <div class="s-item"><b>為什麼平時沒有建議單？</b><p>3 年全市場日K事件研究：市場 5 日報酬 ≥0 時，追漲停、突破 60／120 日新高、急跌反彈的 10 日期望值都是負的；
+      優勢幾乎全在市場急跌後的反彈日（閘門內「深跌後漲停」勝率 95%、單筆均 +13%、+15% 達標 62%，2024／2025／2026 每年皆正）。</p></div>
+    <div class="s-item"><b>閘門</b><p>流動股（20 日均成交值 ≥5,000 萬、股價 10～1,000）等權日報酬近 5 日累計 ≤ ${G.mkt5_le}%，或 ≤ ${G.mkt5_le_rebound}% 且當日 ≥ +${G.rebound_day_ge}%。</p></div>
+    <div class="s-item"><b>型態與排序</b><p>${Object.values(R.setups).map((s) => `${s.name}：${s.desc}`).join("；")}。同股同日兩者皆符合以前者計。依離 60 日高深度排序（被殺最深的先反彈），排除處置股、ETF、持倉中或 ${R.dedup_days} 日內剛交易過的股票。</p></div>
+    <div class="s-item"><b>進出場與模擬</b><p>隔日開盤市價進場，開盤即漲停視為買不到；停損 −${EX.stop_pct}%（跳空以開盤價、跌停鎖死順延）；第 ${EX.min_hold_days} 日起 +${EX.target_pct}% 停利；第 ${EX.max_hold_days} 日收盤時間出場。
+      日K悲觀順序（同日先停損）。成本：手續費 ×2 ＋ 證交稅 0.3%（非當沖）。最多 ${R.max_positions} 檔、每檔權益 ${R.position_pct}%。</p></div>
+    <div class="s-item"><b>限制</b><p>樣本只有 4 次 V 型反彈（2024-08、2025-04、2026-03、2026-07），沒有長空頭；反彈日隔天部分股票鎖漲停買不到，實際容量比表格小。
+      完整研究：<a href="https://github.com/kenhuangads/stock-pick/blob/main/docs/swing_research.md" target="_blank" rel="noopener">docs/swing_research.md</a>。</p></div>`;
 }
 
 /* ---------- 設定 ---------- */

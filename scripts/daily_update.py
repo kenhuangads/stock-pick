@@ -6,6 +6,7 @@
   3. 迭代優化：滾動窗口重算各策略勝率/期望值 → 更新權重（汰弱留強）→ strategies.json
   4. 智能選股：用最新資料 + 最新權重掃描全市場 → picks.json（隔日建議單）
   5. 輸出 market.json 供前端自訂條件即時重新選股
+  6. 波段模組：市場壓力計／閘門／訊號／日K模擬持倉 → data/swing/（詳 swing.py）
 
 用法：
   python scripts/daily_update.py            # 完整每日流程（抓網路資料）
@@ -28,6 +29,7 @@ from optimize import run_optimize
 from price_opt import run_price_opt
 from intraday import ensure_intraday, load_intraday
 from overnight import load_overnight, overnight_for, update_overnight
+from swing import run_swing
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -364,6 +366,16 @@ def main():
         snaps, cfg, reviews, strat_doc, price_doc, overnight_row=on_row)
     if on_row:   # 與清晨校正同口徑標記，前端徽章才不會因盤中重跑而消失
         picks_doc["dawn_corrected"] = bool(picks_doc["regime"].get("overnight_flip"))
+
+    # 波段模組（崩跌反彈）：平時待命、閘門開啟日產單；獨立於當沖流程，失敗不阻斷每日更新
+    # （verify_swing.py 另行審計 ledger 與 state 的一致性與時效）
+    if (cfg.get("swing") or {}).get("enabled", True):
+        try:
+            run_swing(cfg, snaps, rebuild="--rebuild" in args)
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            print(f"[swing] 失敗：{e}")
 
     save_json(DATA / "reviews.json", reviews)
     save_json(LATEST / "market.json", market_doc)

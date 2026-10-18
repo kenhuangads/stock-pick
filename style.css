@@ -244,3 +244,16 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 
 .exit-rule { margin: .3rem 0 .1rem; padding: .35rem .5rem; font-size: .8rem; line-height: 1.45; border-left: 2px solid rgba(245,192,78,.55); background: rgba(245,192,78,.05); border-radius: 0 6px 6px 0; }
 .health.stats { background: rgba(245,192,78,.06); border: 1px solid rgba(245,192,78,.3); }
+
+/* ---------- 波段（崩跌反彈） ---------- */
+.stat.gauge-open { border-color: rgba(46,204,113,.55); background: rgba(46,204,113,.09); }
+.stat.gauge-warn { border-color: rgba(245,192,78,.55); background: rgba(245,192,78,.09); }
+.stat.gauge-idle { opacity: .85; }
+.badge.setup { background: rgba(77,163,255,.12); color: #8fc4ff; border: 1px solid rgba(77,163,255,.35); }
+.badge.taken { background: rgba(46,204,113,.15); color: #58d68d; border: 1px solid rgba(46,204,113,.4); }
+.badge.wait { background: rgba(147,164,184,.12); color: var(--muted); border: 1px solid var(--line); }
+.badge.tier { background: rgba(255,140,60,.16); color: #ffb26b; border: 1px solid rgba(255,140,60,.5); }
+.card.dim { opacity: .62; }
+.swing-h3 { margin: 18px 0 8px; font-size: 15px; }
+.price-grid.g3 { grid-template-columns: repeat(3, 1fr); }
+.trades td.lf, .trades th.lf { text-align: left; }

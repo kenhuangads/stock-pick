@@ -29,6 +29,7 @@
   <button class="tab" data-tab="custom"><span class="t-ico">🔍</span>自訂選股</button>
   <button class="tab" data-tab="review"><span class="t-ico">📒</span>每日復盤</button>
   <button class="tab" data-tab="strategy"><span class="t-ico">🧬</span>策略績效</button>
+  <button class="tab" data-tab="swing"><span class="t-ico">🌊</span>波段</button>
 </nav>
 
 <main>
@@ -112,6 +113,21 @@
       <h3>🧬 汰弱留強紀錄</h3>
       <div id="evolveLog" class="muted small">尚無調整紀錄</div>
     </div>
+  </section>
+
+  <!-- ===== 波段（崩跌反彈） ===== -->
+  <section class="panel" id="panel-swing">
+    <div class="stat-row" id="swingGauge"></div>
+    <div class="chart-card"><canvas id="swingChart"></canvas></div>
+    <div id="swingToday"></div>
+    <div id="swingPositions"></div>
+    <h3 class="swing-h3">📚 事件績效（一次崩跌＝一組）</h3>
+    <div class="stat-row" id="swingSummary"></div>
+    <div id="swingEvents"></div>
+    <details class="explain">
+      <summary>📖 波段模組規則與研究依據（點開查看）</summary>
+      <div id="swingExplain"></div>
+    </details>
   </section>
 </main>
 

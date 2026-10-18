@@ -57,6 +57,8 @@ jobs:
           fi
       - name: 復盤紀錄審計（逐筆重放核實，未通過不得 commit）
         run: python scripts/verify_reviews.py
+      - name: 波段紀錄審計（ledger 重算須與 state 一致）
+        run: python scripts/verify_swing.py
       - name: Commit 資料更新（push 後 Pages 自動建置）
         run: |
           git config user.name "github-actions[bot]"
