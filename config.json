@@ -147,9 +147,16 @@
       "min_hold_days": 5,
       "max_hold_days": 10
     },
-    "max_positions": 20,
-    "t2_max_positions": 30,
-    "position_pct": 5,
+    "ranking": {
+      "weights": {
+        "drawdown": 1.0,
+        "low_vol_ratio": 1.0,
+        "val_ma": 1.0
+      }
+    },
+    "max_positions": 10,
+    "t2_max_positions": 10,
+    "position_pct": 10,
     "lots": 1,
     "dedup_days": 10,
     "breaker": {

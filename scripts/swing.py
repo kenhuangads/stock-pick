@@ -9,7 +9,9 @@
   閘門 T2：MKT5 ≤ −5% 且當日 EW ≥ +3%（反彈確認日；config 自 2026-10-20 放寬為 −3%，觀察項——見 README）
   型態 R1 ：收盤漲停（漲幅 ≥9.5%）且收盤離 60 日高 ≥20%（深跌後漲停，優先）
   型態 R2c：5 日跌幅 ≥15% 且今日收紅（急跌後首根紅K）
-  排序　　：離 60 日高深度（被殺最深的先反彈）；同日最多取「空槽數」檔，其餘列候補
+  排序　　：綜合分＝同日分位數加權「離 60 日高深度（深好）／量比（低好）／20 日均成交值（大好）」
+            （config swing.ranking.weights；三項各有獨立實證，法人籌碼與 20 日報酬經檢驗無增益故不用）；
+            同日最多取「空槽數」檔，其餘列候補
   進場　　：隔日開盤市價；開盤價 ≥ 漲停價（跳動單位取整）視為買不到
   出場　　：停損 −7%（跳空以開盤價、跌停鎖死延後到次日開盤）；第 5 日起 +15% 停利；
             第 10 日收盤時間出場（前 5 日只停損＝至少持有一週）
@@ -48,6 +50,7 @@ DEFAULT_CFG = {
         "R2c": {"enabled": True, "drop_days": 5, "min_drop_pct": 15},
     },
     "exit": {"stop_pct": 7, "target_pct": 15, "min_hold_days": 5, "max_hold_days": 10},
+    "ranking": {"weights": {"drawdown": 1.0, "low_vol_ratio": 0.0, "val_ma": 0.0}},   # 預設＝僅深度（舊行為）
     "max_positions": 20,
     "t2_max_positions": 30,
     "position_pct": 5,
@@ -189,21 +192,60 @@ def detect_signals(S, snaps, i, scfg):
             setups.append("R2c")
         if not setups:
             continue
+        # 量比：訊號日成交量 / 前 20 日均量（實證：量比低者反彈較佳——量能失控的反彈日反而弱）
+        vols = []
+        for j in range(max(0, i - 20), i):
+            kj = snaps[j]["stocks"].get(code)
+            if kj and kj.get("v"):
+                vols.append(kj["v"])
+        v_today = (snaps[i]["stocks"].get(code) or {}).get("v")
+        vol_ratio = round(v_today / (sum(vols) / len(vols)), 2) if (vols and v_today) else None
         out.append({
             "code": code, "name": r["n"], "market": r["m"], "setup": setups[0], "setups": setups,
             "close": c, "chg_pct": round(chg, 2),
             "drop5_pct": round(d5, 2) if d5 is not None else None,
             "drawdown_pct": round(dd, 2) if dd is not None else None, "hi_days": len(highs),
             "val_ma": int(val_ma(r, i, lq["val_window"], lq["min_val_days"]) or 0),
+            "vol_ratio": vol_ratio,
             "limit_up_next": limit_up_price(c),
             "ref_stop": round_tick(c * (1 - ex["stop_pct"] / 100), "down"),
             "ref_target": round_tick(c * (1 + ex["target_pct"] / 100), "up"),
             "rules": dict(ex),
         })
-    out.sort(key=lambda x: (-(x["drawdown_pct"] or 0), x["drop5_pct"] if x["drop5_pct"] is not None else 0))
+    _rank_signals(out, scfg.get("ranking") or {})
+    return out
+
+
+def _pct_rank(vals):
+    """同日分位數 0~1（大=高）；None 視為中位（不加分不扣分）。"""
+    idx = [k for k, v in enumerate(vals) if v is not None]
+    out = [0.5] * len(vals)
+    if len(idx) == 1:
+        out[idx[0]] = 1.0
+    elif idx:
+        order = sorted(idx, key=lambda k: vals[k])
+        for pos, k in enumerate(order):
+            out[k] = pos / (len(order) - 1)
+    return out
+
+
+def _rank_signals(out, rcfg):
+    """綜合分排序：深度（深好）／量比（低好）／成交值（大好）依權重加總同日分位數 → 0~100。
+    檢驗（2026 官方資料 346 筆閘門內/深桶已平倉訊號）：深度 ρ=+0.38 最強、量比 ρ=−0.17（低者 +10.4% vs
+    高者 +4.9%）、閘門內成交值 ρ=+0.25；20 日報酬與深度重疊、融資偏噪音、法人買賣超 ρ≈0 無排序力。
+    日內排序力本就有限（ρ 0.1~0.2）——閘門對不對遠比挑哪幾檔重要。"""
+    w = (rcfg.get("weights") or {})
+    wd, wv, wa = w.get("drawdown", 1.0) or 0, w.get("low_vol_ratio", 0) or 0, w.get("val_ma", 0) or 0
+    tot = (wd + wv + wa) or 1.0
+    pd = _pct_rank([x["drawdown_pct"] for x in out])
+    pv = _pct_rank([(-x["vol_ratio"]) if x.get("vol_ratio") is not None else None for x in out])
+    pa = _pct_rank([x["val_ma"] for x in out])
+    for k, x in enumerate(out):
+        x["score"] = round((wd * pd[k] + wv * pv[k] + wa * pa[k]) / tot * 100, 1)
+        x["score_parts"] = {"drawdown": round(pd[k] * 100), "low_vol_ratio": round(pv[k] * 100), "val_ma": round(pa[k] * 100)}
+    out.sort(key=lambda x: (-x["score"], -(x["drawdown_pct"] or 0), x["drop5_pct"] if x["drop5_pct"] is not None else 0))
     for k, x in enumerate(out, 1):
         x["rank"] = k
-    return out
 
 
 # ---------------------------------------------------------------- 模擬
@@ -457,6 +499,7 @@ def process(cfg, snaps, days, allow_new=True):
         "rules": {"gate": scfg["gate"], "exit": scfg["exit"], "max_positions": scfg["max_positions"],
                   "t2_max_positions": max(scfg["max_positions"], scfg["t2_max_positions"]),
                   "position_pct": scfg["position_pct"], "lots": lots, "setups": SETUP_META,
+                  "ranking": scfg.get("ranking") or {},
                   "breaker": scfg["breaker"], "dedup_days": scfg["dedup_days"]},
     }
     return days, state_doc

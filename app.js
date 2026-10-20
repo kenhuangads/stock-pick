@@ -769,7 +769,9 @@ function swingSignalCard(s, rules) {
     <div class="tags">${swingSetupBadge(s)}
       <span class="tag">離 60 日高 ${s.drawdown_pct == null ? "–" : "−" + Number(s.drawdown_pct).toFixed(1) + "%"}${s.hi_days < 60 ? `（僅 ${s.hi_days} 日資料）` : ""}</span>
       <span class="tag">5 日 ${pctTxt(s.drop5_pct, 1)}</span>
-      <span class="tag">20 日均成交值 ${(s.val_ma / 1e8).toFixed(1)} 億</span></div>
+      <span class="tag">20 日均成交值 ${(s.val_ma / 1e8).toFixed(1)} 億</span>
+      ${s.vol_ratio != null ? `<span class="tag" title="訊號日成交量／前 20 日均量——實證量比低者反彈較佳">量比 ${Number(s.vol_ratio).toFixed(1)}</span>` : ""}
+      ${s.score != null ? `<span class="tag" title="綜合分（同日分位數加權）：離高點深度 ${s.score_parts?.drawdown ?? "–"}／低量比 ${s.score_parts?.low_vol_ratio ?? "–"}／成交值 ${s.score_parts?.val_ma ?? "–"}">綜合分 ${s.score}</span>` : ""}</div>
     <div class="price-grid g3">
       <div><div class="lb">開盤價上限（漲停）</div><div class="v ah">${fmt2(s.limit_up_next)}</div></div>
       <div><div class="lb">參考停損（−${ex.stop_pct}%）</div><div class="v sl">${fmt2(s.ref_stop)}</div></div>
@@ -856,7 +858,7 @@ function renderSwing() {
   const gateRule = `閘門規則：等權 5 日報酬 ≤ ${G.mkt5_le}%（T1 深跌），或 ≤ ${G.mkt5_le_rebound}% 且當日 ≥ +${G.rebound_day_ge}%（T2 反彈確認）。`;
   if (T.state === "open") {
     todayBox.innerHTML = `<div class="notice">🟢 <b>${T.date} 閘門開啟（${T.tier === "T2" ? "T2 反彈確認日" : "T1 深跌"}）</b>：以下為<b>隔日開盤市價買進</b>的波段建議單，
-      共 ${T.signals.length} 檔，依「離 60 日高深度」排序，取前 ${takenN} 檔（槽位上限 ${g.cap_today}${T.tier === "T2" ? `，反彈確認日由 ${g.max_positions} 擴大` : ""}，已用 ${g.open_positions}），其餘候補。
+      共 ${T.signals.length} 檔，依<b>綜合分</b>（離 60 日高深度／低量比／成交值，同日分位數加權）排序，取前 ${takenN} 檔（槽位上限 ${g.cap_today}${T.tier === "T2" && g.cap_today > g.max_positions ? `，反彈確認日由 ${g.max_positions} 擴大` : ""}，已用 ${g.open_positions}），其餘候補。
       ${T.breaker ? `<br>🚧 斷路器：本事件最近兩批進場多數停損${R.breaker.block_entries ? "，已暫停 T1 新單" : "（僅提醒，未阻擋）"}。` : ""}
       <br><span class="small">${gateRule}</span></div>
       <div class="cards">${T.signals.map((s) => swingSignalCard(s, R)).join("")}</div>`;
@@ -898,10 +900,11 @@ function renderSwing() {
     <div class="s-item"><b>為什麼平時沒有建議單？</b><p>3 年全市場日K事件研究：市場 5 日報酬 ≥0 時，追漲停、突破 60／120 日新高、急跌反彈的 10 日期望值都是負的；
       優勢幾乎全在市場急跌後的反彈日（閘門內「深跌後漲停」勝率 95%、單筆均 +13%、+15% 達標 62%，2024／2025／2026 每年皆正）。</p></div>
     <div class="s-item"><b>閘門</b><p>流動股（20 日均成交值 ≥5,000 萬、股價 10～1,000）等權日報酬近 5 日累計 ≤ ${G.mkt5_le}%，或 ≤ ${G.mkt5_le_rebound}% 且當日 ≥ +${G.rebound_day_ge}%。</p></div>
-    <div class="s-item"><b>型態與排序</b><p>${Object.values(R.setups).map((s) => `${s.name}：${s.desc}`).join("；")}。同股同日兩者皆符合以前者計。依離 60 日高深度排序（被殺最深的先反彈），排除處置股、ETF、持倉中或 ${R.dedup_days} 日內剛交易過的股票。</p></div>
+    <div class="s-item"><b>型態與排序</b><p>${Object.values(R.setups).map((s) => `${s.name}：${s.desc}`).join("；")}。同股同日兩者皆符合以前者計。<b>排序＝綜合分</b>：同日分位數加權「離 60 日高深度（被殺最深的先反彈，ρ +0.38）／量比低（量能失控的反彈日反而弱，ρ −0.17）／20 日均成交值大（閘門內 ρ +0.25）」；
+      法人買賣超經檢驗無排序力（ρ ≈ 0）、20 日報酬與深度重疊、融資增減偏噪音，皆不採用。日內排序力本就有限（ρ 0.1～0.2）——閘門對不對遠比挑哪幾檔重要。
+      排除處置股、ETF、持倉中或 ${R.dedup_days} 日內剛交易過的股票。</p></div>
     <div class="s-item"><b>進出場與模擬</b><p>隔日開盤市價進場，開盤即漲停視為買不到；停損 −${EX.stop_pct}%（跳空以開盤價、跌停鎖死順延）；第 ${EX.min_hold_days} 日起 +${EX.target_pct}% 停利；第 ${EX.max_hold_days} 日收盤時間出場。
-      日K悲觀順序（同日先停損）。成本：手續費 ×2 ＋ 證交稅 0.3%（非當沖）。一般日最多 ${R.max_positions} 檔、每檔權益 ${R.position_pct}%；
-      反彈確認日（T2，實證最強的一天：勝率 95%、單筆均 +13%）槽位可擴大到 ${R.t2_max_positions} 檔，需預留這部分資金（\`swing.t2_max_positions\`）。</p></div>
+      日K悲觀順序（同日先停損）。成本：手續費 ×2 ＋ 證交稅 0.3%（非當沖）。最多 ${R.max_positions} 檔、每檔權益 ${R.position_pct}%（${R.max_positions} 檔滿倉＝${R.max_positions * R.position_pct}%，可於 \`swing.position_pct\` 調整）${R.t2_max_positions > R.max_positions ? `；反彈確認日（T2）槽位可擴大到 ${R.t2_max_positions} 檔，需預留這部分資金` : ""}。</p></div>
     <div class="s-item"><b>限制</b><p>樣本只有 4 次 V 型反彈（2024-08、2025-04、2026-03、2026-07），沒有長空頭；反彈日隔天部分股票鎖漲停買不到，實際容量比表格小。
       完整研究：<a href="https://github.com/kenhuangads/stock-pick/blob/main/docs/swing_research.md" target="_blank" rel="noopener">docs/swing_research.md</a>。</p></div>`;
 }
