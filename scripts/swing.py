@@ -272,10 +272,15 @@ def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
     if r["o"][fi] >= lu - 1e-9:
         return {"status": "unfilled", "reason": "limitup", "open_next": r["o"][fi], "limit_up": lu}
     fill = r["o"][fi]
-    stop = round_tick(fill * (1 - rules["stop_pct"] / 100), "down")
-    target = round_tick(fill * (1 + rules["target_pct"] / 100), "up")
+    hard = round_tick(fill * (1 - rules["stop_pct"] / 100), "down")
+    # 移動停損模式（rules.trail_pct > 0）：停損水位＝max(硬停損, 進場後最高收盤 × (1 − trail))，
+    # 每日收盤後上修、不設固定停利（3 年實證：崩跌環境 R1 固定 +15% 停利 +11.7% → 移停 12%/40 日 +16.3%）。
+    # 固定停利模式（trail_pct 缺省/0）：原規則——停損 −stop%、第 min_hold 日起 +target% 停利、max_hold 日時間出場。
+    trail = (rules.get("trail_pct") or 0) / 100
+    stop, peak = hard, fill
+    target = round_tick(fill * (1 + rules["target_pct"] / 100), "up") if (rules.get("target_pct") and not trail) else None
     res = {"status": "open", "fill": fill, "fill_idx": fi, "stop": stop, "target": target,
-           "mfe_pct": 0.0, "mae_pct": 0.0, "lock": False}
+           "mfe_pct": 0.0, "mae_pct": 0.0, "lock": False, "trail_pct": rules.get("trail_pct") or None}
     prevc, pend, last_j = r["c"][t], False, fi
     for j in range(fi, n):
         o, h, l, c = r["o"][j], r["h"][j], r["l"][j], r["c"][j]
@@ -284,6 +289,7 @@ def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
         d = j - fi
         last_j = j
         exit_px = reason = None
+        stop_reason = "trail" if (trail and stop > hard + 1e-9) else "stop"   # 水位已上修＝移動停損出場
         if pend:
             exit_px, reason = o, "stop_lock"
         else:
@@ -292,13 +298,13 @@ def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
                 if locked and o == c:
                     pend = True
                 else:
-                    exit_px, reason = o, "stop"
+                    exit_px, reason = o, stop_reason
             elif l <= stop:
                 if locked:
                     pend = True
                 else:
-                    exit_px, reason = stop, "stop"
-            if exit_px is None and not pend and d >= rules["min_hold_days"]:
+                    exit_px, reason = stop, stop_reason
+            if exit_px is None and not pend and target is not None and d >= rules.get("min_hold_days", 0):
                 if o >= target:
                     exit_px, reason = o, "target"
                 elif h >= target:
@@ -312,6 +318,10 @@ def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
             res.update({"status": "closed", "exit": exit_px, "exit_idx": j, "reason": reason, "days": d,
                         "net": net, "fees": fees, "ret_pct": round(net / (fill * lots * 1000) * 100, 2)})
             return res
+        if trail and not pend:
+            peak = max(peak, c)
+            stop = max(stop, round_tick(peak * (1 - trail), "down"))
+            res["stop"], res["peak"] = stop, peak   # 持倉中顯示目前移停水位
         prevc = c
     res.update({"days": last_j - fi, "last": r["c"][last_j], "last_idx": last_j, "lock": pend,
                 "ret_pct": round((r["c"][last_j] / fill - 1) * 100, 2)})   # 未實現（未扣費）
