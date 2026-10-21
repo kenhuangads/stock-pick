@@ -855,10 +855,12 @@ function renderSwing() {
   // 今日建議單
   const T = sw.today;
   const takenN = T.signals.filter((s) => s.taken).length;
-  const gateRule = `閘門規則：等權 5 日報酬 ≤ ${G.mkt5_le}%（T1 深跌），或 ≤ ${G.mkt5_le_rebound}% 且當日 ≥ +${G.rebound_day_ge}%（T2 反彈確認）。`;
+  const t1Note = G.t1_enabled === false ? "（T1 已關閉，只在反彈確認日出單）"
+    : (G.t1_setups?.length || G.t1_max_new) ? `（T1 日限制：${G.t1_setups?.length ? `只出 ${G.t1_setups.join("/")}` : ""}${G.t1_setups?.length && G.t1_max_new ? "、" : ""}${G.t1_max_new ? `新進場最多 ${G.t1_max_new} 檔` : ""}——3 年 A/B：T1 日單勝率 43%、T2 日 94%，容量要留給反彈確認日）` : "";
+  const gateRule = `閘門規則：等權 5 日報酬 ≤ ${G.mkt5_le}%（T1 深跌），或 ≤ ${G.mkt5_le_rebound}% 且當日 ≥ +${G.rebound_day_ge}%（T2 反彈確認）${t1Note}。`;
   if (T.state === "open") {
     todayBox.innerHTML = `<div class="notice">🟢 <b>${T.date} 閘門開啟（${T.tier === "T2" ? "T2 反彈確認日" : "T1 深跌"}）</b>：以下為<b>隔日開盤市價買進</b>的波段建議單，
-      共 ${T.signals.length} 檔，依<b>綜合分</b>（離 60 日高深度／低量比／成交值，同日分位數加權）排序，取前 ${takenN} 檔（槽位上限 ${g.cap_today}${T.tier === "T2" && g.cap_today > g.max_positions ? `，反彈確認日由 ${g.max_positions} 擴大` : ""}，已用 ${g.open_positions}），其餘候補。
+      共 ${T.signals.length} 檔，依<b>綜合分</b>（離 60 日高深度／低量比／成交值，同日分位數加權）排序，取前 ${takenN} 檔（槽位上限 ${g.cap_today}${T.tier === "T2" && g.cap_today > g.max_positions ? `，反彈確認日由 ${g.max_positions} 擴大` : ""}${T.tier === "T1" && T.t1_cap ? `；T1 日新進場上限 ${T.t1_cap} 檔` : ""}，已用 ${g.open_positions}），其餘候補。
       ${T.breaker ? `<br>🚧 斷路器：本事件最近兩批進場多數停損${R.breaker.block_entries ? "，已暫停 T1 新單" : "（僅提醒，未阻擋）"}。` : ""}
       <br><span class="small">${gateRule}</span></div>
       <div class="cards">${T.signals.map((s) => swingSignalCard(s, R)).join("")}</div>`;
@@ -899,7 +901,9 @@ function renderSwing() {
   explain.innerHTML = `
     <div class="s-item"><b>為什麼平時沒有建議單？</b><p>3 年全市場日K事件研究：市場 5 日報酬 ≥0 時，追漲停、突破 60／120 日新高、急跌反彈的 10 日期望值都是負的；
       優勢幾乎全在市場急跌後的反彈日（閘門內「深跌後漲停」勝率 95%、單筆均 +13%、+15% 達標 62%，2024／2025／2026 每年皆正）。</p></div>
-    <div class="s-item"><b>閘門</b><p>流動股（20 日均成交值 ≥5,000 萬、股價 10～1,000）等權日報酬近 5 日累計 ≤ ${G.mkt5_le}%，或 ≤ ${G.mkt5_le_rebound}% 且當日 ≥ +${G.rebound_day_ge}%。</p></div>
+    <div class="s-item"><b>閘門</b><p>流動股（20 日均成交值 ≥5,000 萬、股價 10～1,000）等權日報酬近 5 日累計 ≤ ${G.mkt5_le}%（T1 深跌），或 ≤ ${G.mkt5_le_rebound}% 且當日 ≥ +${G.rebound_day_ge}%（T2 反彈確認）。
+      <b>T1 與 T2 不對等</b>：3 年引擎 A/B（4 次事件、槽位實際取用）T2 日的單 +17%／勝率 94%／回撤 −0.7%，T1 日的單 +2.6%／勝率 43% 且佔走槽位，反彈確認日只剩 1～2 槽——
+      故 T1 日${G.t1_setups?.length ? `只出 ${G.t1_setups.join("/")}` : "不限型態"}${G.t1_max_new ? `、新進場最多 ${G.t1_max_new} 檔` : ""}（三年 +51%→+55%、回撤 −10.7%→−5.3%）。${G.t1_enabled === false ? "目前 T1 已關閉：只在反彈確認日出單（三年 +61.6%／回撤 −0.7%，但會錯過沒有大反彈日的事件，如 2026-03-09）。" : "若改 `swing.gate.t1_enabled=false` 只留反彈確認日：三年 +61.6%／回撤 −0.7%，代價是錯過沒有大反彈日的事件（如 2026-03-09）。"}</p></div>
     <div class="s-item"><b>型態與排序</b><p>${Object.values(R.setups).map((s) => `${s.name}：${s.desc}`).join("；")}。同股同日兩者皆符合以前者計。<b>排序＝綜合分</b>：同日分位數加權「離 60 日高深度（被殺最深的先反彈，ρ +0.38）／量比低（量能失控的反彈日反而弱，ρ −0.17）／20 日均成交值大（閘門內 ρ +0.25）」；
       法人買賣超經檢驗無排序力（ρ ≈ 0）、20 日報酬與深度重疊、融資增減偏噪音，皆不採用。日內排序力本就有限（ρ 0.1～0.2）——閘門對不對遠比挑哪幾檔重要。
       排除處置股、ETF、持倉中或 ${R.dedup_days} 日內剛交易過的股票。</p></div>

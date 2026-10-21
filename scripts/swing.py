@@ -5,7 +5,8 @@
 故本模組平時待命、只在閘門開啟日產生波段建議單，並以官方日K逐日模擬持倉（悲觀順序）。
 
   市場壓力計：流動股等權日報酬 EW、近 5 日累計 MKT5（%）
-  閘門 T1：MKT5 ≤ −8%（深跌）
+  閘門 T1：MKT5 ≤ −8%（深跌）——config 可限制：t1_setups（預設 R2c 限定）、t1_max_new（T1 日新進場上限 3）、
+            t1_enabled=false 即只在反彈確認日出單（3 年 A/B：T2only +61.6%/回撤 −0.7%，但會錯過無大反彈日的事件）
   閘門 T2：MKT5 ≤ −5% 且當日 EW ≥ +3%（反彈確認日；config 自 2026-10-20 放寬為 −3%，觀察項——見 README）
   型態 R1 ：收盤漲停（漲幅 ≥9.5%）且收盤離 60 日高 ≥20%（深跌後漲停，優先）
   型態 R2c：5 日跌幅 ≥15% 且今日收紅（急跌後首根紅K）
@@ -43,7 +44,10 @@ TAIPEI = timezone(timedelta(hours=8))
 
 DEFAULT_CFG = {
     "enabled": True,
-    "gate": {"mkt5_le": -8.0, "mkt5_le_rebound": -5.0, "rebound_day_ge": 3.0, "warn_mkt5_le": -5.0},
+    "gate": {"mkt5_le": -8.0, "mkt5_le_rebound": -5.0, "rebound_day_ge": 3.0, "warn_mkt5_le": -5.0,
+             # T1（只看深度、不問當日方向）的限制——3 年引擎 A/B（4 事件）：T1 日取用的單 +2.6%／勝率 43%、
+             # 佔走槽位使反彈確認日只剩 1~2 槽；T2 日 +17%／勝率 94%。預設值＝舊行為（不限制）。
+             "t1_enabled": True, "t1_setups": None, "t1_max_new": 0},
     "liquidity": {"min_val_ma": 50_000_000, "min_price": 10, "max_price": 1000, "val_window": 20, "min_val_days": 5},
     "setups": {
         "R1": {"enabled": True, "min_chg_pct": 9.5, "min_drawdown_pct": 20, "lookback": 60, "min_lookback": 40},
@@ -156,10 +160,11 @@ def compute_gauge(S, snaps, scfg):
 def gate_state(mkt5, ew, g):
     if mkt5 is None or ew is None:
         return "na", None
-    if mkt5 <= g["mkt5_le"]:
-        return "open", "T1"
+    # 反彈確認日（T2）優先：同一天兩者皆符合時以 T2 計（T2 的槽位與型態不受 T1 限制）
     if mkt5 <= g["mkt5_le_rebound"] and ew * 100 >= g["rebound_day_ge"]:
         return "open", "T2"
+    if g.get("t1_enabled", True) and mkt5 <= g["mkt5_le"]:
+        return "open", "T1"
     if mkt5 <= g["warn_mkt5_le"]:
         return "warn", None
     return "idle", None
@@ -391,6 +396,10 @@ def process(cfg, snaps, days, allow_new=True):
                 else:
                     events.append({"start": i, "end": i, "idxs": [i]})
                 sigs = [s for s in detect_signals(S, snaps, i, scfg) if not recently_traded(s["code"], i)]
+                g = scfg["gate"]
+                if tier == "T1" and g.get("t1_setups"):
+                    # T1 日只出指定型態（預設 R2c：投降日的急跌首紅K有效、深跌後漲停在非反彈日為負）
+                    sigs = [s for s in sigs if s["setup"] in g["t1_setups"]]
                 for k, s in enumerate(sigs, 1):
                     s["rank"] = k
                 brk = breaker_active(i, tier)
@@ -399,6 +408,9 @@ def process(cfg, snaps, days, allow_new=True):
                 cap = max(scfg["max_positions"], scfg["t2_max_positions"]) if tier == "T2" else scfg["max_positions"]
                 rec["cap"] = cap
                 free = max(0, cap - len(open_at(i)))
+                if tier == "T1" and g.get("t1_max_new"):
+                    free = min(free, int(g["t1_max_new"]))   # T1 日新進場上限：把容量留給反彈確認日
+                    rec["t1_cap"] = int(g["t1_max_new"])
                 slot = 0
                 for s in sigs:
                     s["blocked"] = bool(brk and scfg["breaker"]["block_entries"])

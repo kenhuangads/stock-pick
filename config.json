@@ -118,7 +118,12 @@
       "mkt5_le": -8.0,
       "mkt5_le_rebound": -3.0,
       "rebound_day_ge": 3.0,
-      "warn_mkt5_le": -5.0
+      "warn_mkt5_le": -5.0,
+      "t1_enabled": true,
+      "t1_setups": [
+        "R2c"
+      ],
+      "t1_max_new": 3
     },
     "liquidity": {
       "min_val_ma": 50000000,
