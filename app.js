@@ -579,7 +579,7 @@ function renderReview() {
   });
   });
 
-  $("#reviewList").innerHTML = [...daily].reverse().map((d, idx) => {
+  $("#reviewList").innerHTML = forwardEvidenceHtml() + [...daily].reverse().map((d, idx) => {
     const reasonTxt = { target: "停利", trail: "移動停利", stop: "停損", timeout: "時間停損", close: "收盤沖銷", nofill: "未成交" };
     // 出場價若不是卡片上的價位，就把它是怎麼來的寫出來（移動停利=高/低點回撤、時間停損=該時刻市價）
     const exitTxt = (p) => {
@@ -676,6 +676,49 @@ function renderReview() {
         ${rows}</table></div>
     </details>`;
   }).join("");
+}
+
+/* ---------- 前瞻實證（復盤頁）：自採納日起累積 book_gate／dual_book 的實際結果並自動判定 ---------- */
+function forwardEvidenceHtml() {
+  const cfg = DB.config || {};
+  const bg = cfg.book_gate || {}, db = cfg.dual_book || {};
+  const adopted = db.adopted || bg.adopted;
+  if (!adopted || !DB.reviews?.length) return "";
+  const days = [...DB.reviews].filter((r) => r.date >= adopted).sort((a, b) => a.date.localeCompare(b.date));
+  const thr = db.open_breadth_thr ?? 0.7, needDays = db.min_contra_days ?? 10, reviewAfter = db.review_after_days ?? 90;
+  const due = new Date(adopted); due.setDate(due.getDate() + reviewAfter);
+  const dueTxt = due.toISOString().slice(0, 10);
+  // book_gate：暫停期間的虛擬做多主方向單
+  let gDays = 0, gN = 0, gFilled = 0, gRaw = 0;
+  // dual_book：相反日 vs 其他日，反向名單 raw vs 主向實際
+  let contraDays = 0, cMain = 0, cOpp = 0, cOppFilled = 0, otherDays = 0, oMain = 0, oOpp = 0;
+  for (const r of days) {
+    const picks = r.picks || [];
+    const gated = picks.filter((p) => p.exit_reason === "bookgate");
+    if (gated.length) { gDays++; gN += gated.length; gated.forEach((p) => { if (p.raw) { gFilled++; gRaw += p.raw.net; } }); }
+    const opp = picks.filter((p) => p.book === "opposite");
+    if (!opp.length || !r.mkt || r.mkt.open_up_ratio == null) continue;
+    const mains = picks.filter((p) => p.book !== "opposite" && !p.counter);
+    const nLong = mains.filter((p) => p.side !== "short").length;
+    const book = mains.length ? (nLong * 2 >= mains.length ? "long" : "short") : (opp[0].side === "short" ? "long" : "short");
+    const ratio = r.mkt.open_up_ratio;
+    const contra = (book === "short" && ratio >= thr) || (book === "long" && ratio <= 1 - thr);
+    const mainNet = picks.filter((p) => p.book !== "opposite" && p.filled).reduce((s, p) => s + p.net, 0);
+    const oppNet = opp.reduce((s, p) => s + (p.raw ? p.raw.net : 0), 0);
+    if (contra) { contraDays++; cMain += mainNet; cOpp += oppNet; cOppFilled += opp.filter((p) => p.raw).length; }
+    else { otherDays++; oMain += mainNet; oOpp += oppNet; }
+  }
+  const verdictDual = contraDays >= needDays
+    ? (cOpp > cMain ? `<b class="up">✅ 前瞻證據支持：相反日反向名單 ${signTxt(cOpp)}${fmt(cOpp)} vs 主向 ${signTxt(cMain)}${fmt(cMain)}（${contraDays} 天）——可複審是否自動化</b>`
+                      : `<b class="down">❌ 前瞻證據不支持：相反日反向名單 ${signTxt(cOpp)}${fmt(cOpp)} vs 主向 ${signTxt(cMain)}${fmt(cMain)}（${contraDays} 天）——維持不自動切換</b>`)
+    : `累積中：相反日 ${contraDays}/${needDays} 天（反向名單 ${signTxt(cOpp)}${fmt(cOpp)} vs 主向 ${signTxt(cMain)}${fmt(cMain)}）`;
+  const verdictGate = gDays
+    ? `暫停 ${gDays} 天、虛擬做多主方向單 ${gN} 檔（若執行會成交 ${gFilled} 筆、淨 <b class="${signCls(gRaw)}">${signTxt(gRaw)}${fmt(gRaw)}</b>）——${gRaw < 0 ? "停做是對的" : "停做少賺了這些"}`
+    : "尚未有暫停日";
+  return `<div class="notice" style="margin-bottom:12px">📌 <b>前瞻實證追蹤</b>（自 ${adopted} 起累積 ${days.length} 個復盤日；預定複審日 <b>${dueTxt}</b>${new Date() >= due ? "——<b class=\"up\">已到期，請複審</b>" : ""}）<br>
+    <b>做多書汰弱</b>：${verdictGate}<br>
+    <b>反方向候補</b>（相反日＝全市場開盤上漲占比 ≥${Math.round(thr * 100)}% 且主向為空，或 ≤${Math.round((1 - thr) * 100)}% 且主向為多）：${verdictDual}<br>
+    <span class="muted small">非相反日對照：主向 ${signTxt(oMain)}${fmt(oMain)}、反向名單（若用）${signTxt(oOpp)}${fmt(oOpp)}（${otherDays} 天）——反向名單應只在相反日較好，否則規則無效。採納依據見 README「2026-10-22 迭代」。</span></div>`;
 }
 
 /* ---------- 價格模型（每日復盤頁）---------- */

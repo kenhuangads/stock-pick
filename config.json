@@ -178,11 +178,15 @@
       "long"
     ],
     "window": 20,
-    "below": 0
+    "below": 0,
+    "adopted": "2026-10-22"
   },
   "dual_book": {
     "enabled": true,
     "max_picks": 8,
-    "open_breadth_thr": 0.7
+    "open_breadth_thr": 0.7,
+    "adopted": "2026-10-22",
+    "review_after_days": 90,
+    "min_contra_days": 10
   }
 }

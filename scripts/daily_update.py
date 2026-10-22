@@ -114,6 +114,29 @@ def regime_state(snapshots, cfg, overnight_row=None):
             "overnight": overnight_row, "overnight_flip": on_flip}
 
 
+def market_ctx(prev_snap, cur_snap):
+    """交易日的市場開盤面貌：全市場開盤上漲家數占比（使用者 09:01 在券商看得到的「漲跌家數」）、
+    流動股等權開盤跳空與全日報酬。寫進復盤紀錄供雙書制前瞻實證判定「開盤方向相反日」。"""
+    up = dn = 0
+    g = r = n = 0
+    prev, cur = prev_snap["stocks"], cur_snap["stocks"]
+    for code, k in cur.items():
+        p = prev.get(code)
+        if not p or not p.get("c") or not k.get("o") or not k.get("c"):
+            continue
+        if k["o"] > p["c"]:
+            up += 1
+        elif k["o"] < p["c"]:
+            dn += 1
+        if (k.get("a") or 0) >= 5e7:
+            g += k["o"] / p["c"] - 1
+            r += k["c"] / p["c"] - 1
+            n += 1
+    return {"open_up_ratio": round(up / (up + dn), 3) if up + dn else None,
+            "ew_gap": round(g / n * 100, 2) if n else None,
+            "ew_ret": round(r / n * 100, 2) if n else None}
+
+
 def _main_side(review_entry):
     """一個復盤日的主方向＝非逆勢單的多數方向（無主向單回 None）。"""
     mains = [p for p in (review_entry or {}).get("picks", []) if not p.get("counter") and p.get("book") != "opposite"]
@@ -265,6 +288,8 @@ def do_review_if_due(cfg, reviews, snapshots_by_date, allow_fetch=True):
     bars = (ensure_intraday(trade_date, picks_doc["picks"]) if allow_fetch
             else load_intraday(trade_date))
     entry = run_review(picks_doc, snapshots_by_date[trade_date], cfg, bars)
+    if gen in snapshots_by_date:
+        entry["mkt"] = market_ctx(snapshots_by_date[gen], snapshots_by_date[trade_date])
     reviews.append(entry)
     reviews.sort(key=lambda r: r["date"])
     s = entry["summary"]
@@ -302,6 +327,7 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff
                 else load_intraday(trade_date))
         entry = run_review(picks_doc, snaps[i], cfg, bars)   # 用第 i 天實際行情驗證
+        entry["mkt"] = market_ctx(snaps[i - 1], snaps[i])
         reviews.append(entry)
     n_intra = sum(r["summary"].get("n_intraday", 0) for r in reviews)
     n_all = sum(r["summary"]["n_picks"] for r in reviews)
