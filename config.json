@@ -171,5 +171,13 @@
     },
     "swing_tax": 0.003,
     "history_days": 80
+  },
+  "book_gate": {
+    "enabled": true,
+    "sides": [
+      "long"
+    ],
+    "window": 20,
+    "below": 0
   }
 }

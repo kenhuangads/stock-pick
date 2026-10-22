@@ -47,6 +47,17 @@ def audit():
                 gap_void=cfg.get("simulation", {}).get("gap_void", False),
                 min_cushion=p.get("min_cushion"), entry_cutoff_bar=p.get("cutoff_bar"),
                 tstop_cond=bool(p.get("tstop_cond")))
+            if p.get("shadow"):
+                # 書層級汰弱的虛擬追蹤單：重放結果須與 raw（曾會成交）或 raw_reason（原本就不成交）一致
+                raw = p.get("raw")
+                if filled:
+                    if not raw or (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (fill, exitp, reason):
+                        issues.append(f"{date} {p['code']} shadow 單的 raw 與重放不一致")
+                elif raw or p.get("raw_reason") != reason:
+                    issues.append(f"{date} {p['code']} shadow 單的未成交原因與重放不一致（{p.get('raw_reason')} vs {reason}）")
+                if p["filled"] or p["exit_reason"] != "bookgate" or p["net"] != 0:
+                    issues.append(f"{date} {p['code']} shadow 單不得計入實際損益")
+                continue
             if reason in ("cushionvoid", "expired"):
                 # 執行層規則作廢：另重放「未套規則」的原始結果，須與紀錄的 raw 一致
                 rf, rfill, rexit, rreason, _ = simulate_trade(

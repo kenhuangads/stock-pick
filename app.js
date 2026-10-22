@@ -166,12 +166,12 @@ function stockCard(p, rank) {
        <div><div class="lb" title="${p.trail_dist ? `這不是出場目標：觸及後啟動移動停利，追蹤盤中高點、回落 ${fmt2(p.trail_dist)} 元才賣出（此價為最差賣價）；實際平均賺賠見頁首「實際賺賠結構」` : "停利價"}">${p.trail_dist ? "移停啟動 NH" : "停利 NH"}</div><div class="v tp">${fmt2(p.target ?? p.cdp?.nh)}</div></div>
        <div><div class="lb">停損 AL</div><div class="v sl">${fmt2(p.stop ?? p.cdp?.al)}</div></div>
        <div><div class="lb">順勢突破 AH</div><div class="v ah">${fmt2(p.ah ?? p.cdp?.ah)}</div></div>`);
-  return `<div class="card">
+  return `<div class="card${p.shadow ? " dim" : ""}">
     <div class="head">
       ${rank ? `<span class="rank">#${rank}</span>` : ""}
       <span class="code">${p.code}</span><span class="name">${p.name}</span>
       <span class="mkt">${p.market === "tpex" ? "上櫃" : "上市"}</span>
-      ${sideBadge}${boBadge}
+      ${sideBadge}${boBadge}${p.shadow ? `<span class="badge shadow" title="書層級汰弱：做多主方向單最近 20 個復盤日已實現淨損益為負，依 6 條 walk-forward 路徑實證暫停執行；名單照列、照模擬（虛擬追蹤），滾動值轉正即自動恢復">📵 虛擬追蹤・不執行</span>` : ""}
       ${p.counter ? `<span class="badge ct" title="逆勢配額：與大盤環境主方向相反、以更嚴門檻（活躍命中 ≥3）選出的實驗性標的——環境判定可能錯、強勢股也可能逆勢走，信心自酌">逆勢</span>` : ""}
       ${p.fallback ? `<span class="badge fb" title="未達完整門檻（活躍策略命中不足），為湊滿觀察名單的遞補標的，信心較低">遞補</span>` : ""}
       <span class="score" title="綜合分數（策略權重加總）">${p.score}</span>
@@ -226,6 +226,11 @@ function renderPicks() {
   // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方主做多、<0.5 空方主做空
   const regimeChip = rg && rg.breadth_ma != null
     ? `<span class="badge ${rg.bull ? "on" : "off"}" title="市場寬度＝全市場上漲家數比的 5 日均；≥50% 多方環境以做多為主、<50% 空方環境以做空為主，另保留少量更嚴門檻的逆勢配額">${rg.bull ? "🌤 多方環境 → 做多為主" : "⛈ 空方環境 → 做空為主"}｜寬度5MA ${(rg.breadth_ma * 100).toFixed(0)}%</span> ` : "";
+  // 書層級汰弱橫幅：做多主方向單滾動 20 日為負 → 本日做多主方向單只虛擬追蹤、不執行
+  const bgI = rg?.book_gate;
+  const gateLine = bgI?.paused
+    ? `<div class="health cold">📵 <b>做多主方向書暫停執行</b>：最近 ${bgI.window} 個復盤日做多主方向單合計 <b>${signTxt(bgI.roll)}${fmt(bgI.roll)}</b>（&lt;${fmt(bgI.below)}）。6 條 walk-forward 路徑反事實：此時停做多主方向單全部改善（+875～+51,192、回撤全部縮小）。名單照列並虛擬追蹤（卡片標 📵、復盤不計損益），滾動值轉正自動恢復；做空與逆勢單不受影響。</div>`
+    : (bgI && bgI.roll != null ? `<div class="health warm">做多主方向書運作中：最近 ${bgI.window} 復盤日做多主方向單合計 <b>${signTxt(bgI.roll)}${fmt(bgI.roll)}</b>（轉負即暫停執行）</div>` : "");
   // 翻向日護欄徽章：主方向與前一復盤日不同＝方向可信度最低的日子（10 路徑有 9 條翻向日均為負）
   const flipChip = rg?.flip
     ? `<span class="badge ct" title="主方向與前一交易日相反（寬度 5MA 貼近 50% 的震盪期最常見）——跨 10 條 walk-forward 路徑有 9 條在翻向日平均虧損，故本日主方向名單自動縮編、不遞補；請自行斟酌再縮小部位">⚠️ 環境翻向日｜名單已縮編</span> ` : "";
@@ -275,7 +280,7 @@ function renderPicks() {
   const dawnNote = d.dawn_corrected
     ? `<br>⚡ <b>清晨校正版</b>${dawnAt}：美股收盤後隔夜訊號與台股寬度判定相反，環境已翻轉、建議單已依新方向重出（晚間初版作廢）。${
         d.dawn_late ? `<br>⚠️ <b>此次校正在開盤後才完成</b>（排程被延遲）——若你已依晚間初版進場，請自行判斷是否調整，不要事後拿這份名單回推早盤決策。` : ""}` : "";
-  $("#picksInfo").innerHTML = healthLine + realLine + (n
+  $("#picksInfo").innerHTML = healthLine + realLine + gateLine + (n
     ? `${regimeChip}${flipChip}${onChip}📅 <b>${d.generated_on}</b> 收盤後產生 · 適用<b>下一交易日</b>盤中 · 共 <b>${n}</b> 檔${nFb
         ? `（含遞補 ${nFb} 檔，訊號較弱）` : ""}${dawnNote}${mixTxt ? `<br>${mixTxt}` : ""}
        <br>已排除處置股／注意股／非當沖標的／不可放空者（做空單）／1張風險超日限者／流動性與波動不足者。${priceLine}${riskSummary}`
@@ -611,6 +616,14 @@ function renderReview() {
             : `⏰ ${p.cutoff_bar != null ? tstopTime(p.cutoff_bar) : ""} 前未成交——依進場紀律撤單`;
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
           <td colspan="3">${why}${rawTxt}</td><td>–</td></tr>`;
+        }
+        if (p.exit_reason === "bookgate") {
+          const raw = p.raw;
+          const rawTxt = raw
+            ? `若執行：${reasonHypo[raw.exit_reason] || raw.exit_reason} <span class="${signCls(raw.net)}">${signTxt(raw.net)}${fmt(raw.net)}</span>（虛擬，不計入損益）`
+            : "原本也不會成交";
+          return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
+          <td colspan="3">📵 做多主方向書停用中（滾動 20 日為負）——名單虛擬追蹤、不執行；${rawTxt}</td><td>–</td></tr>`;
         }
         if (p.exit_reason === "gapvoid") {
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>

@@ -123,7 +123,24 @@ def _main_side(review_entry):
     return "long" if n_long * 2 >= len(mains) else "short"
 
 
-def screen_book(market, cfg, weights, shifts, regime, prev_book=None):
+def book_roll(reviews, side, window):
+    """某一方向「主方向單」最近 window 個復盤日的已實現淨損益（含 shadow 虛擬追蹤的 raw）。
+    不足 window 日回 None。被其他執行層規則作廢的單不計（與 6 路徑反事實同口徑）。"""
+    if len(reviews) < window:
+        return None
+    tot = 0
+    for day in reviews[-window:]:
+        for p in day.get("picks", []):
+            if p.get("side", "long") != side or p.get("counter"):
+                continue
+            if p.get("filled"):
+                tot += p["net"]
+            elif p.get("exit_reason") == "bookgate" and p.get("raw"):
+                tot += p["raw"]["net"]
+    return tot
+
+
+def screen_book(market, cfg, weights, shifts, regime, prev_book=None, reviews=None):
     """組當日建議單：主方向（順大盤環境）為主，保留少量「逆勢配額」給另一方向——
     當沖多空皆有機會，環境判定也可能錯；逆勢單門檻更嚴（counter_min_hits）、
     無遞補、數量受 counter_quota 限制，並標記 counter=True 供前端明示與後續實證。
@@ -159,6 +176,20 @@ def screen_book(market, cfg, weights, shifts, regime, prev_book=None):
     c1 = dict(cfg)
     c1["max_picks"] = max(0, max_picks - len(counter_picks))
     main_picks = screen(market, c1, weights, shifts, side=main, allow_fallback=not flip)
+    # 書層級汰弱（book_gate）：該方向主方向單最近 window 個復盤日已實現淨損益 < below → 本日主方向單
+    # 全部標記 shadow（名單照出、復盤照模擬、但不執行、損益記 0），滾動值由 shadow 的 raw 繼續更新，
+    # 轉正自動恢復。6 條 walk-forward 路徑反事實（做多、W=10~30、門檻 0/−5,000）全部改善；做空不穩不套。
+    bg = cfg.get("book_gate") or {}
+    gate_info = None
+    if bg.get("enabled") and main in (bg.get("sides") or []) and reviews is not None:
+        roll = book_roll(reviews, main, int(bg.get("window", 20)))
+        paused = roll is not None and roll < bg.get("below", 0)
+        gate_info = {"side": main, "paused": paused, "roll": roll, "window": int(bg.get("window", 20)),
+                     "below": bg.get("below", 0)}
+        if paused:
+            for p in main_picks:
+                p["shadow"] = True
+    regime["book_gate"] = gate_info
     return main_picks + counter_picks
 
 
@@ -170,7 +201,7 @@ def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc, overnight_ro
     shifts, price_doc = run_price_opt(reviews, cfg, price_doc, latest_date)
     regime = regime_state(snapshots, cfg, overnight_row)
     picks = screen_book(market, cfg, weights, shifts, regime,
-                        prev_book=_main_side(reviews[-1]) if reviews else None)
+                        prev_book=_main_side(reviews[-1]) if reviews else None, reviews=reviews)
     for m in market.values():  # 供前端自訂選股使用的個股觸發標記（多空皆計）
         sl, hl = evaluate(m, weights, "long")
         ss, hs = evaluate(m, weights, "short")
@@ -245,7 +276,7 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         on_row = overnight_for(trade_date, on_doc) if on_doc else None
         regime = regime_state(upto, cfg, on_row)   # 環境閘門同樣只看歷史（walk-forward 誠實）
         picks = screen_book(market, cfg, weights, shifts, regime,
-                            prev_book=_main_side(reviews[-1]) if reviews else None)
+                            prev_book=_main_side(reviews[-1]) if reviews else None, reviews=reviews)
         picks_doc = {"generated_on": latest_date, "picks": picks}
         bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff
                 else load_intraday(trade_date))
