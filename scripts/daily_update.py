@@ -116,7 +116,7 @@ def regime_state(snapshots, cfg, overnight_row=None):
 
 def _main_side(review_entry):
     """一個復盤日的主方向＝非逆勢單的多數方向（無主向單回 None）。"""
-    mains = [p for p in (review_entry or {}).get("picks", []) if not p.get("counter")]
+    mains = [p for p in (review_entry or {}).get("picks", []) if not p.get("counter") and p.get("book") != "opposite"]
     if not mains:
         return None
     n_long = sum(1 for p in mains if p.get("side", "long") == "long")
@@ -138,6 +138,25 @@ def book_roll(reviews, side, window):
             elif p.get("exit_reason") == "bookgate" and p.get("raw"):
                 tot += p["raw"]["net"]
     return tot
+
+
+def opposite_book(market, cfg, weights, shifts, regime):
+    """反方向候補名單（dual_book）：主方向反側的完整名單，標 book=opposite／shadow／learn=False——
+    只在「開盤方向與主方向相反」時由使用者改用（規則：全市場開盤上漲家數占比 ≥ thr 而主向為空、
+    或 ≤ 1−thr 而主向為多）；復盤照模擬但不計損益、不餵策略學習（虛擬追蹤、累積前瞻證據）。
+    依據：4 條 walk-forward 路徑影子雙書重放，開盤方向相反日反向名單優於主向名單 4/4（thr=0.70），
+    但門檻敏感、四路徑共用同一段市場歷史 → 先條件式候補，三個月後複審。"""
+    db = cfg.get("dual_book") or {}
+    if not db.get("enabled") or not regime.get("enabled"):
+        return []
+    opp = "short" if regime["book"] == "long" else "long"
+    c = dict(cfg)
+    c["max_picks"] = int(db.get("max_picks", cfg.get("max_picks", 8)))
+    picks = screen(market, c, weights, shifts, side=opp)
+    for p in picks:
+        p["book"], p["shadow"], p["learn"] = "opposite", True, False
+    regime["dual_book"] = {"opp_side": opp, "open_breadth_thr": db.get("open_breadth_thr", 0.7), "n": len(picks)}
+    return picks
 
 
 def screen_book(market, cfg, weights, shifts, regime, prev_book=None, reviews=None):
@@ -202,6 +221,7 @@ def generate_outputs(snapshots, cfg, reviews, strat_doc, price_doc, overnight_ro
     regime = regime_state(snapshots, cfg, overnight_row)
     picks = screen_book(market, cfg, weights, shifts, regime,
                         prev_book=_main_side(reviews[-1]) if reviews else None, reviews=reviews)
+    picks += opposite_book(market, cfg, weights, shifts, regime)
     for m in market.values():  # 供前端自訂選股使用的個股觸發標記（多空皆計）
         sl, hl = evaluate(m, weights, "long")
         ss, hs = evaluate(m, weights, "short")
@@ -277,6 +297,7 @@ def rebuild_walkforward(cfg, allow_fetch=True):
         regime = regime_state(upto, cfg, on_row)   # 環境閘門同樣只看歷史（walk-forward 誠實）
         picks = screen_book(market, cfg, weights, shifts, regime,
                             prev_book=_main_side(reviews[-1]) if reviews else None, reviews=reviews)
+        picks += opposite_book(market, cfg, weights, shifts, regime)
         picks_doc = {"generated_on": latest_date, "picks": picks}
         bars = (ensure_intraday(trade_date, picks) if allow_fetch and trade_date >= intraday_cutoff
                 else load_intraday(trade_date))

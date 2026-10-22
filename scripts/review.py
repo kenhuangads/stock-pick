@@ -385,16 +385,16 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
     return r
 
 
-def shadow_wrap(rec):
-    """書層級汰弱停用中的主方向單：照常模擬（含全部執行層規則）但不執行——
-    結果搬到 raw 供滾動值與策略學習使用，實際損益記 0、exit_reason=bookgate。"""
+def shadow_wrap(rec, reason="bookgate"):
+    """虛擬追蹤單（書層級汰弱 bookgate／反方向候補 opposite）：照常模擬（含全部執行層規則）但不執行——
+    結果搬到 raw（供滾動值／學習／前瞻證據），實際損益記 0、exit_reason=reason。"""
     rec["shadow"] = True
     if rec["filled"]:
         rec["raw"] = {"filled": True, "fill_price": rec["fill_price"], "exit_price": rec["exit_price"],
                       "exit_reason": rec["exit_reason"], "net": rec["net"], "ret_pct": rec["ret_pct"]}
     else:
         rec["raw_reason"] = rec["exit_reason"]
-    rec.update({"filled": False, "fill_price": None, "exit_price": None, "exit_reason": "bookgate",
+    rec.update({"filled": False, "fill_price": None, "exit_price": None, "exit_reason": reason,
                 "gross": 0, "fees": 0, "net": 0, "ret_pct": None})
     rec.pop("touch_only", None); rec.pop("hypo_reason", None); rec.pop("hypo_ret_pct", None)
     return rec
@@ -411,8 +411,12 @@ def run_review(picks_doc, trade_snapshot, cfg, intraday=None):
         if not k:
             continue  # 停牌等情況：無資料不計
         rec = simulate_pick(pick, k, cfg["fees"], lots, intraday.get(pick["code"]), cfg.get("simulation"))
+        if pick.get("book"):
+            rec["book"] = pick["book"]
+        if pick.get("learn") is False:
+            rec["learn"] = False          # 反方向候補：不餵策略汰弱留強（避免改變學習路徑）
         if pick.get("shadow"):
-            rec = shadow_wrap(rec)
+            rec = shadow_wrap(rec, "opposite" if pick.get("book") == "opposite" else "bookgate")
         results.append(rec)
     filled = [r for r in results if r["filled"]]
     wins = [r for r in filled if r["net"] > 0]
@@ -427,6 +431,7 @@ def run_review(picks_doc, trade_snapshot, cfg, intraday=None):
             "n_intraday": sum(1 for r in results if r["sim_mode"] == "intraday"),
             "n_rulevoid": sum(1 for r in results if r["exit_reason"] in ("cushionvoid", "expired")),
             "n_shadow": sum(1 for r in results if r.get("shadow")),
+            "n_opposite": sum(1 for r in results if r.get("book") == "opposite"),
             "win_rate": round(len(wins) / len(filled) * 100, 1) if filled else None,
             "gross": sum(r["gross"] for r in filled),
             "fees": sum(r["fees"] for r in filled),

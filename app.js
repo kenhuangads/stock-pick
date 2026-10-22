@@ -171,7 +171,7 @@ function stockCard(p, rank) {
       ${rank ? `<span class="rank">#${rank}</span>` : ""}
       <span class="code">${p.code}</span><span class="name">${p.name}</span>
       <span class="mkt">${p.market === "tpex" ? "上櫃" : "上市"}</span>
-      ${sideBadge}${boBadge}${p.shadow ? `<span class="badge shadow" title="書層級汰弱：做多主方向單最近 20 個復盤日已實現淨損益為負，依 6 條 walk-forward 路徑實證暫停執行；名單照列、照模擬（虛擬追蹤），滾動值轉正即自動恢復">📵 虛擬追蹤・不執行</span>` : ""}
+      ${sideBadge}${boBadge}${p.book === "opposite" ? `<span class="badge shadow" title="反方向候補：僅在開盤方向與主方向相反（全市場漲跌家數占比門檻）時使用；虛擬追蹤、不計損益、不餵學習">🔁 反向候補</span>` : p.shadow ? `<span class="badge shadow" title="書層級汰弱：做多主方向單最近 20 個復盤日已實現淨損益為負，依 6 條 walk-forward 路徑實證暫停執行；名單照列、照模擬（虛擬追蹤），滾動值轉正即自動恢復">📵 虛擬追蹤・不執行</span>` : ""}
       ${p.counter ? `<span class="badge ct" title="逆勢配額：與大盤環境主方向相反、以更嚴門檻（活躍命中 ≥3）選出的實驗性標的——環境判定可能錯、強勢股也可能逆勢走，信心自酌">逆勢</span>` : ""}
       ${p.fallback ? `<span class="badge fb" title="未達完整門檻（活躍策略命中不足），為湊滿觀察名單的遞補標的，信心較低">遞補</span>` : ""}
       <span class="score" title="綜合分數（策略權重加總）">${p.score}</span>
@@ -201,7 +201,9 @@ const tstopTime = (bar) => {
 };
 function renderPicks() {
   const d = DB.picks;
-  const n = d.picks?.length || 0;
+  const mainPicks = (d.picks || []).filter((p) => p.book !== "opposite");   // 主方向＋逆勢配額
+  const oppPicks = (d.picks || []).filter((p) => p.book === "opposite");    // 反方向候補（虛擬追蹤）
+  const n = mainPicks.length;
   const sh = d.price_shifts || {};
   const shifted = ["entry", "target", "stop"].some((k) => sh[k]);
   const exitMode = (sh.trail || sh.tstop != null)
@@ -212,16 +214,16 @@ function renderPicks() {
   // 事前風險總覽：全下（依建議張數）觸停損的最壞合計（side-aware）
   let riskSummary = "";
   if (rk.enabled && n) {
-    const worstSum = d.picks.reduce((s, p) => {
+    const worstSum = mainPicks.reduce((s, p) => {
       if (p.entry == null || p.stop == null || p.entry === p.stop) return s;
       const lots = sizeLots({ fill_price: p.entry, stop: p.stop, side: p.side }, rk);
       return s + -sideNet(p.side, p.entry, p.stop, lots).net;
     }, 0);
     riskSummary = `<br>🛡️ 依建議張數全下、全部觸停損的最壞合計約 <b>−${fmt(worstSum)}</b>；你的日限 <b>−${fmt(rk.daily_loss_limit)}</b>——盤中實際請依風險閘門順序進場（超額即停，卡片有逐檔標註）。`;
   }
-  const nFb = (d.picks || []).filter((p) => p.fallback).length;
-  const nCt = (d.picks || []).filter((p) => p.counter).length;
-  const nShort = (d.picks || []).filter((p) => p.side === "short").length;
+  const nFb = mainPicks.filter((p) => p.fallback).length;
+  const nCt = mainPicks.filter((p) => p.counter).length;
+  const nShort = mainPicks.filter((p) => p.side === "short").length;
   const nLong = n - nShort;
   // 大盤環境徽章：市場寬度（上漲家數比）5 日均，≥0.5 多方主做多、<0.5 空方主做空
   const regimeChip = rg && rg.breadth_ma != null
@@ -285,8 +287,14 @@ function renderPicks() {
         ? `（含遞補 ${nFb} 檔，訊號較弱）` : ""}${dawnNote}${mixTxt ? `<br>${mixTxt}` : ""}
        <br>已排除處置股／注意股／非當沖標的／不可放空者（做空單）／1張風險超日限者／流動性與波動不足者。${priceLine}${riskSummary}`
     : `${regimeChip}${flipChip}${onChip}本日${book === "short" ? "空方環境下亦" : ""}無符合門檻的標的（可能連續假期後資料待更新，或基礎濾網過嚴）。可到「自訂選股」自行研究。`);
-  $("#picksList").innerHTML = (d.picks || []).map((p, i) => stockCard(p, i + 1)).join("") ||
-    `<div class="empty">今日無推薦標的</div>`;
+  // 反方向候補名單：僅在開盤方向與主方向相反時使用（全市場漲跌家數＝使用者 09:01 可觀察的代理）
+  const dbI = rg?.dual_book;
+  const thrPct = Math.round(((dbI?.open_breadth_thr ?? 0.7) * 100));
+  const oppHtml = oppPicks.length ? `<div class="notice" style="grid-column:1/-1;margin-top:10px">🔁 <b>反方向候補名單（${oppPicks[0].side === "short" ? "🔻 做空" : "🔺 做多"} ${oppPicks.length} 檔）——只在開盤方向與主方向相反時使用</b><br>
+      開盤後看全市場<b>漲跌家數</b>：${rg?.book === "short" ? `上漲家數占比 <b>≥ ${thrPct}%</b>（主方向判空卻普遍開高）` : `上漲家數占比 <b>≤ ${100 - thrPct}%</b>（主方向判多卻普遍開低）`} → 主方向判錯，改用此名單（同樣的掛單／作廢／出場規則）；否則不用。<br>
+      <span class="muted small">依據：4 條 walk-forward 路徑的影子雙書重放，開盤方向相反日反向名單優於主向名單 4/4（+3.6k～+30k）；但門檻敏感、四路徑共用同一段市場歷史——故先列為候補並<b>虛擬追蹤</b>（復盤不計損益、不餵學習），累積三個月前瞻證據後複審。</span></div>` + oppPicks.map((p, i) => stockCard(p, i + 1)).join("") : "";
+  $("#picksList").innerHTML = (mainPicks.map((p, i) => stockCard(p, i + 1)).join("") ||
+    `<div class="empty">今日無推薦標的</div>`) + oppHtml;
 
   const w = d.weights_used || {};
   $("#strategyExplain").innerHTML = Object.values(stratMeta)
@@ -616,6 +624,14 @@ function renderReview() {
             : `⏰ ${p.cutoff_bar != null ? tstopTime(p.cutoff_bar) : ""} 前未成交——依進場紀律撤單`;
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
           <td colspan="3">${why}${rawTxt}</td><td>–</td></tr>`;
+        }
+        if (p.exit_reason === "opposite") {
+          const raw = p.raw;
+          const rawTxt = raw
+            ? `若執行：${reasonHypo[raw.exit_reason] || raw.exit_reason} <span class="${signCls(raw.net)}">${signTxt(raw.net)}${fmt(raw.net)}</span>（虛擬，不計入損益）`
+            : "原本也不會成交";
+          return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
+          <td colspan="3">🔁 反方向候補（開盤方向相反時才用；虛擬追蹤）——${rawTxt}</td><td>–</td></tr>`;
         }
         if (p.exit_reason === "bookgate") {
           const raw = p.raw;

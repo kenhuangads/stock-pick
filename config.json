@@ -179,5 +179,10 @@
     ],
     "window": 20,
     "below": 0
+  },
+  "dual_book": {
+    "enabled": true,
+    "max_picks": 8,
+    "open_breadth_thr": 0.7
   }
 }

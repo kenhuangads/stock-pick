@@ -55,7 +55,7 @@ def audit():
                         issues.append(f"{date} {p['code']} shadow 單的 raw 與重放不一致")
                 elif raw or p.get("raw_reason") != reason:
                     issues.append(f"{date} {p['code']} shadow 單的未成交原因與重放不一致（{p.get('raw_reason')} vs {reason}）")
-                if p["filled"] or p["exit_reason"] != "bookgate" or p["net"] != 0:
+                if p["filled"] or p["exit_reason"] not in ("bookgate", "opposite") or p["net"] != 0:
                     issues.append(f"{date} {p['code']} shadow 單不得計入實際損益")
                 continue
             if reason in ("cushionvoid", "expired"):
