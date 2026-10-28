@@ -48,13 +48,31 @@ def audit():
                 min_cushion=p.get("min_cushion"), entry_cutoff_bar=p.get("cutoff_bar"),
                 tstop_cond=bool(p.get("tstop_cond")))
             if p.get("shadow"):
-                # 書層級汰弱的虛擬追蹤單：重放結果須與 raw（曾會成交）或 raw_reason（原本就不成交）一致
+                # 虛擬追蹤單（書層級汰弱／反向候補）：重放須與紀錄一致——
+                # 底層會成交 → raw 為「若執行」結果（無 raw_reason）；底層未成交 → raw_reason 為底層原因，
+                # 此時若另有 raw，那是執行層規則（緩衝/撤單）作廢單的「若仍進場」原始模擬（10/5 設計），
+                # 須與未套規則的重放一致——兩種 raw 語意以 raw_reason 有無區分。
                 raw = p.get("raw")
                 if filled:
-                    if not raw or (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (fill, exitp, reason):
+                    if p.get("raw_reason") or not raw or \
+                            (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (fill, exitp, reason):
                         issues.append(f"{date} {p['code']} shadow 單的 raw 與重放不一致")
-                elif raw or p.get("raw_reason") != reason:
-                    issues.append(f"{date} {p['code']} shadow 單的未成交原因與重放不一致（{p.get('raw_reason')} vs {reason}）")
+                else:
+                    if p.get("raw_reason") != reason:
+                        issues.append(f"{date} {p['code']} shadow 單的未成交原因與重放不一致（{p.get('raw_reason')} vs {reason}）")
+                    if raw:
+                        if reason not in ("cushionvoid", "expired"):
+                            issues.append(f"{date} {p['code']} shadow 未成交單不應有 raw（{reason}）")
+                        else:
+                            rf, rfill, rexit, rreason, _ = simulate_trade(
+                                p["entry"], p["target"], p["stop"], ohlc, bars,
+                                p.get("trail_dist"), p.get("tstop_bar"),
+                                strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
+                                side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
+                                gap_void=cfg.get("simulation", {}).get("gap_void", False),
+                                tstop_cond=bool(p.get("tstop_cond")))
+                            if not rf or (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (rfill, rexit, rreason):
+                                issues.append(f"{date} {p['code']} shadow 規則作廢單的 raw 與未套規則重放不一致")
                 if p["filled"] or p["exit_reason"] not in ("bookgate", "opposite") or p["net"] != 0:
                     issues.append(f"{date} {p['code']} shadow 單不得計入實際損益")
                 continue

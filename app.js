@@ -607,6 +607,7 @@ function renderReview() {
       const nameCell = `${sm}${p.code} ${p.name}${planLine}`;
       if (!p.filled) {
         const reasonHypo = { target: "觸及停利", trail: "移動停利", stop: "觸及停損", timeout: "時間停損", close: "收盤沖銷" };
+        const voidLabel = { gapvoid: "開盤穿價作廢", cushionvoid: "開盤緩衝不足作廢", expired: "逾時撤單", nofill: "未觸價" };
         if (p.touch_only) {
           const hypo = p.hypo_reason
             ? `；若排到隊：${reasonHypo[p.hypo_reason] || p.hypo_reason} ${signTxt(p.hypo_ret_pct)}${fmt2(p.hypo_ret_pct)}%`
@@ -627,17 +628,17 @@ function renderReview() {
         }
         if (p.exit_reason === "opposite") {
           const raw = p.raw;
-          const rawTxt = raw
+          const rawTxt = (raw && !p.raw_reason)
             ? `若執行：${reasonHypo[raw.exit_reason] || raw.exit_reason} <span class="${signCls(raw.net)}">${signTxt(raw.net)}${fmt(raw.net)}</span>（虛擬，不計入損益）`
-            : "原本也不會成交";
+            : `原本也不會進場（${voidLabel[p.raw_reason] || p.raw_reason || "未成交"}）`;
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
           <td colspan="3">🔁 反方向候補（開盤方向相反時才用；虛擬追蹤）——${rawTxt}</td><td>–</td></tr>`;
         }
         if (p.exit_reason === "bookgate") {
           const raw = p.raw;
-          const rawTxt = raw
+          const rawTxt = (raw && !p.raw_reason)
             ? `若執行：${reasonHypo[raw.exit_reason] || raw.exit_reason} <span class="${signCls(raw.net)}">${signTxt(raw.net)}${fmt(raw.net)}</span>（虛擬，不計入損益）`
-            : "原本也不會成交";
+            : `原本也不會進場（${voidLabel[p.raw_reason] || p.raw_reason || "未成交"}）`;
           return `<tr class="dim"><td>${nameCell}</td><td>${fmt2(p.entry)}</td>
           <td colspan="3">📵 做多主方向書停用中（滾動 20 日為負）——名單虛擬追蹤、不執行；${rawTxt}</td><td>–</td></tr>`;
         }
@@ -695,7 +696,7 @@ function forwardEvidenceHtml() {
   for (const r of days) {
     const picks = r.picks || [];
     const gated = picks.filter((p) => p.exit_reason === "bookgate");
-    if (gated.length) { gDays++; gN += gated.length; gated.forEach((p) => { if (p.raw) { gFilled++; gRaw += p.raw.net; } }); }
+    if (gated.length) { gDays++; gN += gated.length; gated.forEach((p) => { if (p.raw && !p.raw_reason) { gFilled++; gRaw += p.raw.net; } }); }
     const opp = picks.filter((p) => p.book === "opposite");
     if (!opp.length || !r.mkt || r.mkt.open_up_ratio == null) continue;
     const mains = picks.filter((p) => p.book !== "opposite" && !p.counter);
@@ -704,8 +705,8 @@ function forwardEvidenceHtml() {
     const ratio = r.mkt.open_up_ratio;
     const contra = (book === "short" && ratio >= thr) || (book === "long" && ratio <= 1 - thr);
     const mainNet = picks.filter((p) => p.book !== "opposite" && p.filled).reduce((s, p) => s + p.net, 0);
-    const oppNet = opp.reduce((s, p) => s + (p.raw ? p.raw.net : 0), 0);
-    if (contra) { contraDays++; cMain += mainNet; cOpp += oppNet; cOppFilled += opp.filter((p) => p.raw).length; }
+    const oppNet = opp.reduce((s, p) => s + ((p.raw && !p.raw_reason) ? p.raw.net : 0), 0);
+    if (contra) { contraDays++; cMain += mainNet; cOpp += oppNet; cOppFilled += opp.filter((p) => p.raw && !p.raw_reason).length; }
     else { otherDays++; oMain += mainNet; oOpp += oppNet; }
   }
   const verdictDual = contraDays >= needDays

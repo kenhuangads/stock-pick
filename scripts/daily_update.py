@@ -158,8 +158,8 @@ def book_roll(reviews, side, window):
                 continue
             if p.get("filled"):
                 tot += p["net"]
-            elif p.get("exit_reason") == "bookgate" and p.get("raw"):
-                tot += p["raw"]["net"]
+            elif p.get("exit_reason") == "bookgate" and p.get("raw") and not p.get("raw_reason"):
+                tot += p["raw"]["net"]   # 虛擬單「若執行」會成交；有 raw_reason 者底層本來就作廢，不計
     return tot
 
 
@@ -359,14 +359,12 @@ def dawn_correction(cfg):
     if not on_row:
         print("[dawn] 無隔夜資料（美股假日或抓取失敗），維持晚間版")
         return
-    prev = load_json(LATEST / "picks.json", None)
     snaps = twstock.load_snapshots()
     reviews = load_json(DATA / "reviews.json", [])
     strat_doc = load_json(LATEST / "strategies.json", None)
     price_doc = load_json(LATEST / "price_model.json", None)
     market_doc, picks_doc, strat_doc, price_doc = generate_outputs(
         snaps, cfg, reviews, strat_doc, price_doc, overnight_row=on_row)
-    old_book = ((prev or {}).get("regime") or {}).get("book")
     new_book = picks_doc["regime"]["book"]
     now = datetime.now(TAIPEI)
     picks_doc["dawn_corrected"] = bool(picks_doc["regime"].get("overnight_flip"))
@@ -379,7 +377,7 @@ def dawn_correction(cfg):
     flip = picks_doc["regime"].get("overnight_flip")
     late = "（⚠️ 已開盤後才校正）" if picks_doc["dawn_late"] else ""
     print(f"[dawn] {now:%H:%M} 隔夜加權 {on_row.get('w'):+}%（費半 {on_row.get('sox'):+}%）→ "
-          f"{'⚡ 環境翻轉 ' + str(old_book) + '→' + str(new_book) + '，已重出建議單' if flip else f'方向維持 {new_book}，僅更新隔夜資訊'}{late}")
+          f"{'⚡ 隔夜訊號翻轉：寬度判 ' + ('short' if new_book == 'long' else 'long') + ' → 改為 ' + str(new_book) + '，已重出建議單' if flip else f'方向維持 {new_book}，僅更新隔夜資訊'}{late}")
 
 
 def main():
