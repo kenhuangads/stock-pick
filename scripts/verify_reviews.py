@@ -58,8 +58,20 @@ def audit():
                             (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (fill, exitp, reason):
                         issues.append(f"{date} {p['code']} shadow 單的 raw 與重放不一致")
                 else:
-                    if p.get("raw_reason") != reason:
-                        issues.append(f"{date} {p['code']} shadow 單的未成交原因與重放不一致（{p.get('raw_reason')} vs {reason}）")
+                    # 與 simulate_pick 同口徑：逾時撤單但未套規則也不會成交 → 紀錄為一般未成交（nofill）
+                    cmp_reason = reason
+                    if reason == "expired":
+                        rf, _rfill, _rexit, rreason, _ = simulate_trade(
+                            p["entry"], p["target"], p["stop"], ohlc, bars,
+                            p.get("trail_dist"), p.get("tstop_bar"),
+                            strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
+                            side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
+                            gap_void=cfg.get("simulation", {}).get("gap_void", False),
+                            tstop_cond=bool(p.get("tstop_cond")))
+                        if not rf:
+                            cmp_reason = rreason
+                    if p.get("raw_reason") != cmp_reason:
+                        issues.append(f"{date} {p['code']} shadow 單的未成交原因與重放不一致（{p.get('raw_reason')} vs {cmp_reason}）")
                     if raw:
                         if reason not in ("cushionvoid", "expired"):
                             issues.append(f"{date} {p['code']} shadow 未成交單不應有 raw（{reason}）")
