@@ -69,7 +69,8 @@ def bars_match_ohlc(bars, ohlc, tol=0.005, min_bars=40):
 
 def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
                     strict_fill=False, limit_up=None, entry_mode="revert", gap_void=False,
-                    min_cushion=None, entry_cutoff_bar=None, tstop_cond=False):
+                    min_cushion=None, entry_cutoff_bar=None, tstop_cond=False,
+                    reclaim_bars=None, reclaim_mode="exit"):
     """做空模擬（做多邏輯的鏡像）：放空掛 entry（高、逆勢賣出區），
     回補停利 target（低）、停損 stop（高）。價格上漲＝虧損方向。
     移動停利：觸及回補價後追蹤「谷底＋trail」，讓下跌的尾巴多跑；原回補價為天花板。
@@ -90,12 +91,21 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
             return max(px, limit_up) if px is not None else limit_up
         return px
 
+    reclaim_on = bool(reclaim_bars) and not breakout
+    confirm = reclaim_on and reclaim_mode == "confirm"
     if bars:
         fill = None
         armed, trough = False, None   # 觸及回補價後啟動移動停利追蹤
         be_set = False                  # 條件式時停：已把停損移到成交價（保本）
+        sweep_i, reclaimed, deadline = None, True, None   # 破敗訊號閘門（鏡像：收盤重回掛賣價之下＝收回）
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
+                if sweep_i is not None:
+                    if i > sweep_i + reclaim_bars - 1:
+                        return False, None, None, "noreclaim", "intraday"
+                    if bc < entry:
+                        fill = bc - tick_size(bc) if strict_fill else bc
+                    continue
                 if entry_cutoff_bar is not None and i >= entry_cutoff_bar:
                     return False, None, None, "expired", "intraday"   # 掛單時限到：撤單
                 if breakout:
@@ -113,10 +123,19 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
                     fill = entry            # 盤中漲（穿）觸掛賣價成交
                 else:
                     continue
+                if confirm:
+                    sweep_i, fill = i, None
+                    if bc < entry:
+                        fill = bc - tick_size(bc) if strict_fill else bc
+                    continue
                 if fill >= stop:
                     return True, fill, stop_px(fill, bh), "stop", "intraday"  # 跳空穿越停損
                 if bh >= stop:
                     return True, fill, stop_px(stop, bh), "stop", "intraday"
+                if reclaim_on:
+                    deadline, reclaimed = i + reclaim_bars - 1, bc < entry
+                    if not reclaimed and i >= deadline:
+                        return True, fill, bc, "noreclaim", "intraday"
                 continue
             if not armed:
                 if bh >= stop:
@@ -141,6 +160,11 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
                 if bh >= level:
                     return True, fill, level, "trail", "intraday"
                 trough = min(trough, bl)
+            if reclaim_on and not reclaimed:
+                if bc < entry:
+                    reclaimed = True
+                elif i >= deadline:
+                    return True, fill, bc, "noreclaim", "intraday"
         if fill is None:
             return False, None, None, "nofill", "intraday"
         return True, fill, ohlc["c"], "close", "intraday"
@@ -173,7 +197,7 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
 def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
                    strict_fill=False, limit_dn=None, side="long", limit_up=None,
                    entry_mode="revert", gap_void=False, min_cushion=None, entry_cutoff_bar=None,
-                   tstop_cond=False):
+                   tstop_cond=False, reclaim_bars=None, reclaim_mode="exit"):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
     side="short" 走完全鏡像的做空邏輯（放空掛高、回補在低、停損在高、漲停穿越修正）。
@@ -194,11 +218,17 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
     兩者為執行層規則（2026-10-05）：跨 5 條 walk-forward 路徑類別記帳，10:00 後成交的單 5/5 路徑負期望、
     空單開盤緩衝 <0.5R 者 4/5 路徑負期望；僅於建議單帶有該欄位時生效（舊紀錄重放不受影響）。
     出場理由：target 停利｜trail 移動停利｜stop 停損｜timeout 時間停損｜close 收盤沖銷｜
-    nofill 未成交｜gapvoid 開盤穿價作廢｜cushionvoid 開盤緩衝不足作廢｜expired 逾時撤單。"""
+    nofill 未成交｜gapvoid 開盤穿價作廢｜cushionvoid 開盤緩衝不足作廢｜expired 逾時撤單｜
+    noreclaim 破敗訊號未收回（確認模式＝未進場；快停模式＝成交後未收回即出場）。
+    reclaim_bars / reclaim_mode（破敗訊號閘門，預設關＝行為不變；僅 intraday 逆勢掛單）：
+      掃破掛價（成交條件）後，K 根內須有一根「收盤重回掛價之上」（做空：之下）才算收回。
+      mode="exit"：照舊在掃破根成交，K 根內未收回 → 以第 K 根收盤出場（快速失敗）。
+      mode="confirm"：掃破根不成交，等收回確認根以其收盤追價進場（strict_fill＝滑價 1 tick），
+      K 根內未收回 → 不進場。"""
     if side == "short":
         return _simulate_short(entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
                                strict_fill, limit_up, entry_mode, gap_void, min_cushion, entry_cutoff_bar,
-                               tstop_cond)
+                               tstop_cond, reclaim_bars, reclaim_mode)
     breakout = entry_mode == "breakout"
     if gap_void and not breakout and ohlc["o"] < entry:
         return False, None, None, "gapvoid", "intraday" if bars else "daily"
@@ -211,12 +241,23 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
             return min(px, limit_dn) if px is not None else limit_dn
         return px
 
+    reclaim_on = bool(reclaim_bars) and not breakout
+    confirm = reclaim_on and reclaim_mode == "confirm"
     if bars:
         fill = None
         armed, peak = False, None   # 觸及停利價後啟動移動停利追蹤
         be_set = False                # 條件式時停：已把停損移到成交價（保本）
+        sweep_i, reclaimed, deadline = None, True, None   # 破敗訊號閘門狀態（閘門關＝視為已收回）
         for i, (bo, bh, bl, bc) in enumerate(bars):
             if fill is None:
+                if sweep_i is not None:
+                    # 確認模式：掃破後等「收回」——K 根內（含掃破根）收盤重回掛價之上才以該根收盤追買，
+                    # 出場規則自下一根起；逾 K 根未收回 → 不進場
+                    if i > sweep_i + reclaim_bars - 1:
+                        return False, None, None, "noreclaim", "intraday"
+                    if bc > entry:
+                        fill = bc + tick_size(bc) if strict_fill else bc
+                    continue
                 if entry_cutoff_bar is not None and i >= entry_cutoff_bar:
                     return False, None, None, "expired", "intraday"   # 掛單時限到：撤單
                 if breakout:
@@ -236,11 +277,20 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
                     fill = entry            # 盤中（穿）觸掛價成交
                 else:
                     continue
+                if confirm:
+                    sweep_i, fill = i, None   # 掃破根不成交；本根自身收回（下影線）即以本根收盤追買
+                    if bc > entry:
+                        fill = bc + tick_size(bc) if strict_fill else bc
+                    continue
                 if fill <= stop:
                     # 跳空直接穿越停損：停損單即刻觸發，以成交價出場（僅損費用）
                     return True, fill, stop_px(fill, bl), "stop", "intraday"
                 if bl <= stop:
                     return True, fill, stop_px(stop, bl), "stop", "intraday"
+                if reclaim_on:
+                    deadline, reclaimed = i + reclaim_bars - 1, bc > entry
+                    if not reclaimed and i >= deadline:
+                        return True, fill, bc, "noreclaim", "intraday"   # 快停：成交根即未收回
                 continue
             if not armed:
                 if bl <= stop:
@@ -266,6 +316,11 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
                 if bl <= level:
                     return True, fill, level, "trail", "intraday"
                 peak = max(peak, bh)
+            if reclaim_on and not reclaimed:
+                if bc > entry:
+                    reclaimed = True
+                elif i >= deadline:
+                    return True, fill, bc, "noreclaim", "intraday"   # 快停：K 根內未收回掛價
         if fill is None:
             return False, None, None, "nofill", "intraday"
         return True, fill, ohlc["c"], "close", "intraday"
