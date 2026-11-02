@@ -90,6 +90,15 @@
     "short_min_cushion_r": 0.5,
     "long_min_cushion_r": 0
   },
+  "pullback_entry": {
+    "enabled": true,
+    "sides": [
+      "short"
+    ],
+    "r": 0.3,
+    "cutoff_bar": 24,
+    "adopted": "2026-11-02"
+  },
   "risk": {
     "daily_loss_limit": 10000,
     "max_consecutive_losses": 3,

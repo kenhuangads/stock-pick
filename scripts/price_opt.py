@@ -38,7 +38,8 @@ from indicators import price_from_shifts
 from review import trade_fees, simulate_trade, bars_match_ohlc, limit_down_price, limit_up_price
 from intraday import load_intraday
 
-ZERO = {"entry": 0.0, "target": 0.0, "stop": 0.0, "trail": 0.0, "tstop": None, "mode": "revert"}
+ZERO = {"entry": 0.0, "target": 0.0, "stop": 0.0, "trail": 0.0, "tstop": None, "mode": "revert",
+        "pb": None, "cutoff": None}   # pb/cutoff：entry_mode=pullback 的回檔距離（R 倍數）與掛單時限
 
 
 def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="long", gap_void=False,
@@ -49,17 +50,22 @@ def _sim_one(rec, shifts, fees_cfg, lots, bars=None, strict_fill=False, side="lo
     base = rec["cdp_base"]
     r = base["r"]
     mode = shifts.get("mode", "revert")
+    if mode == "pullback" and not shifts.get("pb"):
+        mode = "revert"   # 防護：缺回檔距離的 pullback 偏移組以逆勢掛單重放
     entry, target, stop = price_from_shifts(base, r, shifts, side)
     trail_mult = shifts.get("trail") or 0
     trail_dist = round(trail_mult * r, 2) if trail_mult else None
     tstop_bar = shifts.get("tstop")
 
     ohlc = {"o": rec["day_open"], "h": rec["day_high"], "l": rec["day_low"], "c": rec["day_close"]}
+    # pullback：回檔距離與掛單時限隨偏移組帶入（開盤回檔掛單的「掛太遠」＝逾時未反彈到掛價）
+    pb_dist = round(shifts["pb"] * r, 2) if (mode == "pullback" and shifts.get("pb")) else None
+    cutoff = shifts.get("cutoff") if mode == "pullback" else None
     filled, fill, exit_price, reason, _ = simulate_trade(
         entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
         strict_fill=strict_fill, limit_dn=limit_down_price(rec.get("prev_close")),
         side=side, limit_up=limit_up_price(rec.get("prev_close")), entry_mode=mode,
-        gap_void=gap_void, tstop_cond=tstop_cond)
+        gap_void=gap_void, tstop_cond=tstop_cond, pb_dist=pb_dist, entry_cutoff_bar=cutoff)
     if not filled:
         if reason == "gapvoid":
             return False, 0, "gapvoid"   # 開盤穿價主動作廢：非「掛太遠」、不計 runaway
@@ -164,6 +170,13 @@ def _step_toward(current, best, grids, max_step):
     return out
 
 
+def _bar_time(bar):
+    if bar is None:
+        return "–"
+    mins = 9 * 60 + bar * 5
+    return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
 def _fmt_mode(sh):
     t = f"{sh['trail']:.2f}R" if sh.get("trail") else "關"
     ts = sh.get("tstop")
@@ -172,12 +185,17 @@ def _fmt_mode(sh):
         tss = f"{mins // 60:02d}:{mins % 60:02d}"
     else:
         tss = "關"
-    em = "、進場=突破追價" if sh.get("mode") == "breakout" else ""
+    if sh.get("mode") == "breakout":
+        em = "、進場=突破追價"
+    elif sh.get("mode") == "pullback":
+        em = f"、進場=開盤回檔 {sh.get('pb')}R 掛單"
+    else:
+        em = ""
     return f"移動停利 {t}、時間停損 {tss}{em}"
 
 
 def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_date, side,
-                   gap_void=False, tstop_cond=False):
+                   gap_void=False, tstop_cond=False, forced_mode=None, pb_r=None, pb_cutoff=None):
     """單一方向的網格搜尋＋遲滯切換。回傳 (current_shifts, cur_stat, base_stat)。
     records 為該方向的復盤紀錄；current 為現行偏移（就地不改，回傳新 dict）。
 
@@ -193,6 +211,20 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
     objective = pcfg.get("objective", "net")
     step_lim = pcfg.get("max_step_per_day", 0)
     current = dict(ZERO, **current)   # 補齊缺漏鍵（舊檔無 mode → revert）
+    # 固定進場模式（config.pullback_entry）：模式不進搜尋空間，偏移/出場引擎照常在該模式下優化。
+    # 2026-11-02：做空側 entry_mode=pullback（開盤回檔掛單）——21 條 walk-forward 路徑類別記帳 20~21 條改善
+    if forced_mode:
+        want_pb = pb_r if forced_mode == "pullback" else None
+        want_cut = pb_cutoff if forced_mode == "pullback" else None
+        if (current.get("mode"), current.get("pb"), current.get("cutoff")) != (forced_mode, want_pb, want_cut):
+            log.append({"date": as_of_date,
+                        "msg": f"{label}進場模式改為「{'開盤回檔掛單' if forced_mode == 'pullback' else forced_mode}」"
+                               f"（{'開盤後掛 開盤價' + ('+' if side == 'short' else '−') + str(pb_r) + 'R、停利/停損等距平移、掛單至 ' + _bar_time(pb_cutoff) + '；' if want_pb else ''}"
+                               f"依 config 固定，偏移與出場引擎照常迭代）"})
+            current = dict(current, mode=forced_mode, pb=want_pb, cutoff=want_cut)
+    elif current.get("mode") == "pullback":
+        log.append({"date": as_of_date, "msg": f"{label}開盤回檔掛單已停用，回到逆勢掛單"})
+        current = dict(current, mode="revert", pb=None, cutoff=None)
 
     base = _replay(records, ZERO, fees_cfg, lots, strict, side, gap_void, tstop_cond)
     cur = _replay(records, current, fees_cfg, lots, strict, side, gap_void, tstop_cond)
@@ -208,7 +240,9 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
         # 成交率硬門檻是「限價掛單」的可執行性要求（掛太遠=建議做不到）。
         # 突破追價是停損單語意：未觸發=無趨勢不進場（設計目的、非執行失敗），
         # 拿觸發率當門檻會結構性鎖死該模式——改要求絕對成交筆數達統計門檻。
-        if mode == "breakout":
+        # 開盤回檔掛單同理：未反彈到掛價＝設計上的「不追」，成交率結構性低於限價逆勢單（約 4~5 成）；
+        # 以絕對成交筆數為資格門檻，再依 objective 挑選。
+        if mode in ("breakout", "pullback"):
             return st["fills"] >= pcfg["min_trades"]
         return fill_rate(st) >= target_fr
 
@@ -218,7 +252,7 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
         grid_stop = pcfg.get("stop_grid") or grid_exit   # 停損可用獨立網格（支援更緊的停損）
         grid_trail = pcfg.get("trail_grid", [0])
         grid_tstop = pcfg.get("tstop_grid", [None])
-        modes = pcfg.get("entry_modes") or ["revert"]
+        modes = [forced_mode] if forced_mode else (pcfg.get("entry_modes") or ["revert"])
         min_payoff = pcfg.get("min_payoff", 1.2)
         payoff_hard = pcfg.get("payoff_hard", False)   # 賺賠比門檻改為硬約束（見 _select）
         grids = {"entry": grid_entry, "target": grid_exit, "stop": grid_stop,
@@ -231,7 +265,9 @@ def _optimize_side(records, pcfg, fees_cfg, lots, strict, current, log, as_of_da
                         for t in grid_trail:
                             for ts in grid_tstop:
                                 sh = {"entry": a, "target": b, "stop": c, "trail": t,
-                                      "tstop": ts, "mode": mode}
+                                      "tstop": ts, "mode": mode,
+                                      "pb": pb_r if mode == "pullback" else None,
+                                      "cutoff": pb_cutoff if mode == "pullback" else None}
                                 st = _replay(records, sh, fees_cfg, lots, strict, side, gap_void, tstop_cond)
                                 # 同分傾向：小偏移優先；出場引擎依採納紀律決定偏好方向
                                 if step_lim:
@@ -362,9 +398,14 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
     gap_void = cfg.get("simulation", {}).get("gap_void", False)
     tstop_cond = bool(cfg.get("simulation", {}).get("tstop_conditional", False))
     target_fr = pcfg.get("target_fill_rate", 0)
+    pbc = cfg.get("pullback_entry") or {}
+    pb_sides = set(pbc.get("sides") or []) if pbc.get("enabled") else set()
+    pb_r = pbc.get("r", 0.3)
+    pb_cutoff = pbc.get("cutoff_bar", cfg.get("simulation", {}).get("entry_cutoff_bar"))
 
     cur_long, stat_long, base_long = _optimize_side(
-        recs["long"], pcfg, fees_cfg, lots, strict, cur_long, log, as_of_date, "long", gap_void, tstop_cond)
+        recs["long"], pcfg, fees_cfg, lots, strict, cur_long, log, as_of_date, "long", gap_void, tstop_cond,
+        forced_mode="pullback" if "long" in pb_sides else None, pb_r=pb_r, pb_cutoff=pb_cutoff)
 
     # 做空側：樣本不足時暫借做多偏移起步（掛單成交的物理對稱：偏移一律往市場方向移動）
     base_short_probe = _replay(recs["short"], ZERO, fees_cfg, lots, strict, "short", gap_void, tstop_cond)
@@ -374,7 +415,8 @@ def run_price_opt(reviews, cfg, prev_doc, as_of_date):
                     "msg": f"空方價格模型樣本不足（窗口成交 {base_short_probe['fills']} 筆 < {pcfg['min_trades']}），"
                            f"暫借做多側偏移起步（進場 {cur_long['entry']:+.2f}R 等），樣本足夠後自動獨立優化"})
     cur_short, stat_short, base_short = _optimize_side(
-        recs["short"], pcfg, fees_cfg, lots, strict, cur_short, log, as_of_date, "short", gap_void, tstop_cond)
+        recs["short"], pcfg, fees_cfg, lots, strict, cur_short, log, as_of_date, "short", gap_void, tstop_cond,
+        forced_mode="pullback" if "short" in pb_sides else None, pb_r=pb_r, pb_cutoff=pb_cutoff)
 
     doc = {
         "updated": as_of_date,

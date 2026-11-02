@@ -46,6 +46,7 @@ def price_from_shifts(base, day_range, shifts, side="long"):
       多：entry=AH−e·R 漲穿觸發追買（e 越大觸發越低=越易成交）、target=AH+t·R、
           stop=entry−(0.5−s)·R（s 越大停損越緊，與 revert 的心智模型一致）
       空：entry=AL+e·R 跌破觸發追空、target=AL−t·R、stop=entry+(0.5−s)·R
+    pullback（開盤回檔掛單）：價位同 revert 的「參考計畫」，實際掛價於開盤後由 pullback_plan 以開盤價錨定平移。
     皆保證 停損/停利 與進場的相對位置合法（至少差 1 tick）。"""
     s = shifts or {}
     r = day_range
@@ -73,6 +74,29 @@ def price_from_shifts(base, day_range, shifts, side="long"):
         stop = min(stop, round_tick(entry - tick_size(entry), "down"))     # 停損必須低於進場
         target = max(target, round_tick(entry + tick_size(entry), "up"))   # 停利必須高於進場
     return entry, target, stop
+
+
+def pullback_plan(entry, target, stop, day_open, pb_dist, side="long"):
+    """開盤回檔掛單（entry_mode=pullback，2026-11-02）：以「當日開盤價」為錨——
+    多：掛 open−pb_dist 等回檔；空：掛 open+pb_dist 等反彈；停利／停損與參考計畫（CDP 逆勢價位）
+    等距平移，維持原 R 倍數結構。entry/target/stop 為參考計畫（開盤前已知）；回傳 (掛價, 停利, 停損)。
+    依據：21 條 walk-forward 路徑同路徑類別記帳，做空側 0.2~0.3R 皆 20~21 條改善（中位數 +17k~+20k/路徑）。"""
+    if side == "short":
+        order = round_tick(day_open + pb_dist, "up")
+    else:
+        order = round_tick(day_open - pb_dist, "down")
+    d = order - entry
+    if side == "short":
+        t = round_tick(target + d, "down")
+        st = round_tick(stop + d, "up")
+        st = max(st, round_tick(order + tick_size(order), "up"))
+        t = min(t, round_tick(order - tick_size(order), "down"))
+    else:
+        t = round_tick(target + d, "up")
+        st = round_tick(stop + d, "down")
+        st = min(st, round_tick(order - tick_size(order), "down"))
+        t = max(t, round_tick(order + tick_size(order), "up"))
+    return order, t, st
 
 
 def sma(values, n):

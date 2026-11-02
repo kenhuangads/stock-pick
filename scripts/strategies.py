@@ -262,19 +262,24 @@ def make_pick(m, score, hits, discount, price_shifts=None, side="long", sim_cfg=
     tstop = ss.get("tstop")
     # 執行層規則（跨 5 路徑類別記帳實證，2026-10-05）：隨建議單寫入、復盤依單上欄位套用
     sim = sim_cfg or {}
-    revert = ss.get("mode", "revert") == "revert"
+    mode = ss.get("mode", "revert")
+    if mode == "pullback" and not ss.get("pb"):
+        mode = "revert"   # 防護：偏移組缺回檔距離時退回逆勢掛單（復盤引擎對缺 pb_dist 的 pullback 單會報錯）
+    revert = mode == "revert"
+    pullback = mode == "pullback"   # 開盤回檔掛單：價位為參考計畫，開盤後以開盤價錨定（見 indicators.pullback_plan）
     k_cush = sim.get("short_min_cushion_r" if side == "short" else "long_min_cushion_r") or 0
     return {
         "code": m["code"], "name": m["name"], "market": m["market"], "side": side,
         "close": m["close"], "chg_pct": m["chg_pct"],
         "score": score, "strategies": hits,
         "entry": entry, "target": target, "stop": stop, "ah": c["ah"],
-        "entry_mode": ss.get("mode", "revert"),   # revert=逆勢掛單｜breakout=突破追價
+        "entry_mode": mode,   # revert=逆勢掛單｜breakout=突破追價｜pullback=開盤回檔掛單
+        "pb_dist": round(ss["pb"] * day_range, 2) if (pullback and ss.get("pb")) else None,
         "trail_dist": round(trail_mult * day_range, 2) if trail_mult else None,
         "tstop_bar": tstop,
         # 開盤緩衝下限（絕對價差）：開盤距掛價不足即作廢；掛單時限：該根（12＝10:00）後未成交即撤單
         "min_cushion": round(k_cush * day_range, 2) if (k_cush and revert) else None,
-        "cutoff_bar": sim.get("entry_cutoff_bar"),
+        "cutoff_bar": (ss.get("cutoff") if (pullback and ss.get("cutoff") is not None) else sim.get("entry_cutoff_bar")),
         "tstop_cond": True if (sim.get("tstop_conditional") and tstop is not None) else None,
         "cdp_base": {"nl": c["nl"], "nh": c["nh"], "al": c["al"], "ah": c["ah"], "r": round(day_range, 2)},
         "breakeven_ticks": breakeven_ticks(entry, discount),

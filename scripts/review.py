@@ -32,7 +32,7 @@
 """
 
 
-from indicators import round_tick, tick_size
+from indicators import round_tick, tick_size, pullback_plan
 
 
 def limit_down_price(prev_close):
@@ -197,7 +197,7 @@ def _simulate_short(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop
 def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_bar=None,
                    strict_fill=False, limit_dn=None, side="long", limit_up=None,
                    entry_mode="revert", gap_void=False, min_cushion=None, entry_cutoff_bar=None,
-                   tstop_cond=False, reclaim_bars=None, reclaim_mode="exit"):
+                   tstop_cond=False, reclaim_bars=None, reclaim_mode="exit", pb_dist=None):
     """共用模擬核心（review 與 price_opt 都走這裡，確保口徑一致）。
     回傳 (filled, fill_price, exit_price, exit_reason, sim_mode)。
     side="short" 走完全鏡像的做空邏輯（放空掛高、回補在低、停損在高、漲停穿越修正）。
@@ -224,7 +224,19 @@ def simulate_trade(entry, target, stop, ohlc, bars=None, trail_dist=None, tstop_
       掃破掛價（成交條件）後，K 根內須有一根「收盤重回掛價之上」（做空：之下）才算收回。
       mode="exit"：照舊在掃破根成交，K 根內未收回 → 以第 K 根收盤出場（快速失敗）。
       mode="confirm"：掃破根不成交，等收回確認根以其收盤追價進場（strict_fill＝滑價 1 tick），
-      K 根內未收回 → 不進場。"""
+      K 根內未收回 → 不進場。
+    entry_mode="pullback"（開盤回檔掛單，2026-11-02）：entry/target/stop 為參考計畫；開盤已穿參考掛價
+      （多：開盤<entry；空：開盤>entry＝隔夜反向跳空）→ gapvoid 作廢；否則以開盤價錨定——
+      掛價＝開盤∓pb_dist、停利/停損等距平移（indicators.pullback_plan），之後走逆勢限價單流程
+      （開盤緩衝規則不適用；掛單時限 entry_cutoff_bar 照用）。依據：21 條 walk-forward 路徑類別記帳，
+      做空側 20~21/21 條改善、中位數 +17k~+20k/路徑；做多側不適用（0~11/21）。"""
+    if entry_mode == "pullback":
+        if pb_dist is None:
+            raise ValueError("entry_mode=pullback 需要 pb_dist")
+        if (ohlc["o"] > entry) if side == "short" else (ohlc["o"] < entry):
+            return False, None, None, "gapvoid", "intraday" if bars else "daily"
+        entry, target, stop = pullback_plan(entry, target, stop, ohlc["o"], pb_dist, side)
+        entry_mode, gap_void, min_cushion = "revert", False, None
     if side == "short":
         return _simulate_short(entry, target, stop, ohlc, bars, trail_dist, tstop_bar,
                                strict_fill, limit_up, entry_mode, gap_void, min_cushion, entry_cutoff_bar,
@@ -379,6 +391,7 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         # 執行層規則（建議單產生時寫入；舊單無此欄位＝不套用，歷史重放口徑不變）
         "min_cushion": pick.get("min_cushion"), "cutoff_bar": pick.get("cutoff_bar"),
         "tstop_cond": pick.get("tstop_cond"),
+        "pb_dist": pick.get("pb_dist"),    # 開盤回檔掛單距離（entry_mode=pullback；絕對價差）
         "prev_close": pick.get("close"),   # 訊號日收盤＝交易日的「前收」，供停板價/重放使用
         "cdp_base": pick.get("cdp_base"),  # 原始 CDP 價位與當日振幅，供價格模型重放迭代
         "day_open": ohlc["o"], "day_high": ohlc["h"], "day_low": ohlc["l"], "day_close": ohlc["c"],
@@ -394,12 +407,16 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
                    side=side, limit_up=limit_up_price(pick.get("close")),
                    entry_mode=pick.get("entry_mode", "revert"),
                    gap_void=sim_cfg.get("gap_void", False),
-                   tstop_cond=bool(pick.get("tstop_cond")))
+                   tstop_cond=bool(pick.get("tstop_cond")), pb_dist=pick.get("pb_dist"))
     filled, fill, exit_price, reason, mode = simulate_trade(
         pick["entry"], pick["target"], pick["stop"], ohlc, bars,
         pick.get("trail_dist"), pick.get("tstop_bar"),
         min_cushion=pick.get("min_cushion"), entry_cutoff_bar=pick.get("cutoff_bar"), **base_kw)
     r["sim_mode"], r["exit_reason"] = mode, reason
+    if pick.get("entry_mode") == "pullback" and pick.get("pb_dist") and reason != "gapvoid":
+        # 開盤回檔掛單的「有效計畫」（開盤後才決定的實際掛價／停利／停損），供前端與稽核使用
+        r["order"], r["target_eff"], r["stop_eff"] = pullback_plan(
+            pick["entry"], pick["target"], pick["stop"], ohlc["o"], pick["pb_dist"], side)
     if reason in ("cushionvoid", "expired"):
         # 執行層規則作廢的單：另存「未套規則」的原始模擬結果（raw）。
         # 學習迴路（策略汰弱留強）仍以 raw 累積樣本——規則只決定「實際做不做」，
@@ -421,15 +438,17 @@ def simulate_pick(pick, ohlc, fees_cfg, lots=1, bars=None, sim_cfg=None):
         # 後段買不到（不確定成交）。保守口徑仍記未成交（防逆選擇灌水），
         # 但附上「若排到隊」的假想結果供人工判讀（例：8/4 旺宏 109.5 觸最低即飛）。
         # 突破追價單無排隊問題（觸發即以滑價成交）、開盤穿價作廢單是主動放棄——皆不適用此標註。
+        eff_entry = r.get("order", pick["entry"])   # pullback 單以開盤後的實際掛價判定觸價
         touched = (pick.get("entry_mode", "revert") != "breakout" and reason != "gapvoid" and
-                   ((ohlc["h"] >= pick["entry"]) if side == "short" else (ohlc["l"] <= pick["entry"])))
+                   ((ohlc["h"] >= eff_entry) if side == "short" else (ohlc["l"] <= eff_entry)))
         if touched and sim_cfg.get("strict_fill"):
             r["touch_only"] = True
             h_filled, h_fill, h_exit, h_reason, _ = simulate_trade(
                 pick["entry"], pick["target"], pick["stop"], ohlc, bars,
                 pick.get("trail_dist"), pick.get("tstop_bar"),
                 strict_fill=False, limit_dn=limit_down_price(pick.get("close")),
-                side=side, limit_up=limit_up_price(pick.get("close")))
+                side=side, limit_up=limit_up_price(pick.get("close")),
+                entry_mode=pick.get("entry_mode", "revert"), pb_dist=pick.get("pb_dist"))
             if h_filled:
                 r["hypo_reason"] = h_reason
                 r["hypo_ret_pct"] = round(((h_fill - h_exit) if side == "short" else (h_exit - h_fill))

@@ -39,6 +39,10 @@ def audit():
 
             side = p.get("side", "long")
             emode = p.get("entry_mode", "revert")
+            # 開盤回檔掛單：稽核觸價／停利順序／停損價時用「開盤後的有效計畫」（order/target_eff/stop_eff）
+            eff_entry = p.get("order") or p["entry"]
+            eff_target = p.get("target_eff") or p["target"]
+            eff_stop = p.get("stop_eff") or p["stop"]
             filled, fill, exitp, reason, mode = simulate_trade(
                 p["entry"], p["target"], p["stop"], ohlc, bars,
                 p.get("trail_dist"), p.get("tstop_bar"),
@@ -46,7 +50,7 @@ def audit():
                 side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
                 gap_void=cfg.get("simulation", {}).get("gap_void", False),
                 min_cushion=p.get("min_cushion"), entry_cutoff_bar=p.get("cutoff_bar"),
-                tstop_cond=bool(p.get("tstop_cond")))
+                tstop_cond=bool(p.get("tstop_cond")), pb_dist=p.get("pb_dist"))
             if p.get("shadow"):
                 # 虛擬追蹤單（書層級汰弱／反向候補）：重放須與紀錄一致——
                 # 底層會成交 → raw 為「若執行」結果（無 raw_reason）；底層未成交 → raw_reason 為底層原因，
@@ -67,7 +71,7 @@ def audit():
                             strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
                             side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
                             gap_void=cfg.get("simulation", {}).get("gap_void", False),
-                            tstop_cond=bool(p.get("tstop_cond")))
+                            tstop_cond=bool(p.get("tstop_cond")), pb_dist=p.get("pb_dist"))
                         if not rf:
                             cmp_reason = rreason
                     if p.get("raw_reason") != cmp_reason:
@@ -82,7 +86,7 @@ def audit():
                                 strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
                                 side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
                                 gap_void=cfg.get("simulation", {}).get("gap_void", False),
-                                tstop_cond=bool(p.get("tstop_cond")))
+                                tstop_cond=bool(p.get("tstop_cond")), pb_dist=p.get("pb_dist"))
                             if not rf or (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (rfill, rexit, rreason):
                                 issues.append(f"{date} {p['code']} shadow 規則作廢單的 raw 與未套規則重放不一致")
                 if p["filled"] or p["exit_reason"] not in ("bookgate", "opposite") or p["net"] != 0:
@@ -96,7 +100,7 @@ def audit():
                     strict_fill=strict, limit_dn=limit_down_price(p.get("prev_close")),
                     side=side, limit_up=limit_up_price(p.get("prev_close")), entry_mode=emode,
                     gap_void=cfg.get("simulation", {}).get("gap_void", False),
-                    tstop_cond=bool(p.get("tstop_cond")))
+                    tstop_cond=bool(p.get("tstop_cond")), pb_dist=p.get("pb_dist"))
                 raw = p.get("raw")
                 if rf:
                     if not raw or (raw["fill_price"], raw["exit_price"], raw["exit_reason"]) != (rfill, rexit, rreason):
@@ -117,24 +121,24 @@ def audit():
                 # 突破追價=穿越觸發（多：漲穿；空：跌穿），觸發即成交（滑價另計）
                 if emode == "breakout":
                     if side == "short":
-                        return b[0] <= p["entry"] or b[2] <= p["entry"]
-                    return b[0] >= p["entry"] or b[1] >= p["entry"]
+                        return b[0] <= eff_entry or b[2] <= eff_entry
+                    return b[0] >= eff_entry or b[1] >= eff_entry
                 if side == "short":
-                    return b[0] >= p["entry"] or (b[1] > p["entry"] if strict else b[1] >= p["entry"])
-                return b[0] <= p["entry"] or (b[2] < p["entry"] if strict else b[2] <= p["entry"])
+                    return b[0] >= eff_entry or (b[1] > eff_entry if strict else b[1] >= eff_entry)
+                return b[0] <= eff_entry or (b[2] < eff_entry if strict else b[2] <= eff_entry)
 
             if p["exit_reason"] in ("target", "trail"):
                 fill_i = next((i for i, b in enumerate(bars) if fillable(b)), None)
                 # 做多：成交後須觸及過停利價（高 ≥ target）；做空：須觸及回補價（低 ≤ target）
-                touched = (any(b[2] <= p["target"] for b in bars[fill_i + 1:]) if side == "short"
-                           else any(b[1] >= p["target"] for b in bars[fill_i + 1:])) if fill_i is not None else False
+                touched = (any(b[2] <= eff_target for b in bars[fill_i + 1:]) if side == "short"
+                           else any(b[1] >= eff_target for b in bars[fill_i + 1:])) if fill_i is not None else False
                 if not touched:
                     issues.append(f"{date} {p['code']} 停利順序違規：成交後未曾觸及 {p['target']}")
             if p["exit_reason"] == "stop":
                 # 未跳空卻拿到「優於停損」的出場價＝bug（做多出場>停損；做空出場<停損）
-                if side == "short" and p["fill_price"] < p["stop"] and p["exit_price"] < p["stop"]:
+                if side == "short" and p["fill_price"] < eff_stop and p["exit_price"] < eff_stop:
                     issues.append(f"{date} {p['code']} 做空停損回補價 {p['exit_price']} 低於停損價 {p['stop']}")
-                if side == "long" and p["fill_price"] > p["stop"] and p["exit_price"] > p["stop"]:
+                if side == "long" and p["fill_price"] > eff_stop and p["exit_price"] > eff_stop:
                     issues.append(f"{date} {p['code']} 停損出場價 {p['exit_price']} 高於停損價 {p['stop']}（未跳空卻優於停損）")
             if not p["filled"] and any(fillable(b) for b in bars):
                 gave_up = False
@@ -151,7 +155,7 @@ def audit():
                 elif emode == "breakout":
                     # 突破單合法的「觸發但未進場」：觸發根開盤已越過停利價 → 引擎不追（放棄）
                     fb = next(b for b in bars if fillable(b))
-                    gave_up = (fb[0] <= p["target"]) if side == "short" else (fb[0] >= p["target"])
+                    gave_up = (fb[0] <= eff_target) if side == "short" else (fb[0] >= eff_target)
                 if not gave_up:
                     issues.append(f"{date} {p['code']} 未成交但 5分K 顯示曾觸價")
 
