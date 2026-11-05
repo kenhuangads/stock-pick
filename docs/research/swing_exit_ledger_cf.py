@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """模組實際取用的 64 筆已平倉波段單：同一批進場，只換出場規則的反事實（無槽位效應，逐筆對照）。"""
 import json, sys
+from pathlib import Path
 from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
