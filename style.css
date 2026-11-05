@@ -258,3 +258,54 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 .price-grid.g3 { grid-template-columns: repeat(3, 1fr); }
 .trades td.lf, .trades th.lf { text-align: left; }
 .badge.shadow { background: rgba(147,164,184,.12); color: #93a4b8; border: 1px solid rgba(147,164,184,.4); }
+
+/* ---------- 桌機版（≥1024px）：用滿橫向空間——側欄＋多欄卡片、較高圖表、置中分頁 ----------
+   手機版（<1024px）完全不受影響：以下全部是加法式媒體查詢。 */
+@media (min-width: 1024px) {
+  :root { --wrap: 1180px; --side: 360px; }
+  main { max-width: var(--wrap); padding: 18px 24px 40px; }
+  .foot { max-width: var(--wrap); padding: 0 24px; }
+  .topbar {
+    padding-left: max(16px, calc((100% - var(--wrap)) / 2 + 24px));
+    padding-right: max(16px, calc((100% - var(--wrap)) / 2 + 24px));
+  }
+  .topbar h1 { font-size: 19px; }
+  .topbar .sub { font-size: 12.5px; }
+  .tabs { justify-content: center; }
+  .tab { flex: 0 1 190px; font-size: 14.5px; }
+  .cards { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+  .card { padding: 16px; }
+  .price-grid .lb { font-size: 11.5px; }
+  .price-grid .v { font-size: 16px; }
+  .chart-card { height: 320px; }
+  .notice { font-size: 13.5px; }
+  .trades { font-size: 13px; }
+  .stat .v { font-size: 20px; }
+  #reviewStats { grid-template-columns: repeat(5, 1fr); }            /* 10 個指標 → 2 列 × 5，不留孤兒列 */
+  #priceModelStats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .explain .s-item p { font-size: 13px; }
+
+  /* 今日選股／自訂選股：左側欄（環境、健康度、風險總覽／篩選條件，捲動時固定）＋右側卡片多欄 */
+  #panel-picks.active, #panel-custom.active {
+    display: grid; grid-template-columns: var(--side) minmax(0, 1fr); gap: 18px; align-items: start;
+  }
+  #picksInfo, #customForm {
+    grid-column: 1; grid-row: 1 / span 3; position: sticky; top: 112px;
+    max-height: calc(100vh - 128px); overflow: auto; margin-bottom: 0;
+  }
+  #picksList, #customList, #customInfo, #panel-picks > .explain { grid-column: 2; }
+  #panel-picks > .explain { margin-top: 2px; }
+  .filter-card .grid2 { grid-template-columns: 1fr 1fr; }
+  #picksInfo::-webkit-scrollbar, #customForm::-webkit-scrollbar { width: 6px; }
+  #picksInfo::-webkit-scrollbar-thumb, #customForm::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+}
+@media (min-width: 1440px) { :root { --wrap: 1320px; --side: 380px; } }
+@media (min-width: 1680px) { :root { --wrap: 1480px; } }
+/* 滑鼠裝置的 hover 回饋（觸控裝置不套用） */
+@media (hover: hover) {
+  .card { transition: border-color .15s ease; }
+  .card:hover { border-color: #3f4c61; }
+  .tab:hover { color: var(--text); }
+  .btn:hover { filter: brightness(1.08); }
+  .day-block summary:hover { background: rgba(255,255,255,.025); }
+}
