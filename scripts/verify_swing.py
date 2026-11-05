@@ -18,8 +18,8 @@ import twstock
 import swing
 
 ROOT = Path(__file__).resolve().parent.parent
-FIELDS = ("status", "fill", "fill_date", "stop", "target", "exit", "exit_date", "reason", "days", "ret_pct", "net",
-          "open_next", "limit_up", "mfe_pct", "mae_pct", "lock")
+FIELDS = ("status", "fill", "fill_date", "stop", "target", "target_pct", "locked", "exit", "exit_date", "reason", "days",
+          "ret_pct", "net", "open_next", "limit_up", "mfe_pct", "mae_pct", "lock")
 
 
 def audit():
@@ -64,6 +64,10 @@ def audit():
             issues.append(f"{r['signal_date']} {r['code']} 第 {r['days']} 日停利，早於最少持有 {rules['min_hold_days']} 日")
         if r["reason"] == "time" and r["days"] < rules["max_hold_days"]:
             issues.append(f"{r['signal_date']} {r['code']} 第 {r['days']} 日時間出場，早於 {rules['max_hold_days']} 日")
+        if r["reason"] == "trail" and not (rules.get("lock_trail_pct") or rules.get("trail_pct")):
+            issues.append(f"{r['signal_date']} {r['code']} 移停出場但規則無移停")
+        if r.get("locked") and r["reason"] == "trail" and r["exit"] < r["floor"] and r["exit"] != r.get("open_exit", r["exit"]):
+            pass
     print(f"[verify-swing] 掃描 {len(days)} 日、訊號 {n_sig} 筆（取用 {n_taken}）、已平倉 {len(state.get('trades', []))}、"
           f"持倉 {len(state.get('positions', []))}、買不到 {len(state.get('unfilled', []))}")
     if ledger.get("last_date") != snaps[-1]["date"]:

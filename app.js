@@ -893,12 +893,23 @@ function renderStrategies() {
 let swingChart = null;
 const pctTxt = (v, d = 2) => (v == null ? "–" : `${v > 0 ? "+" : ""}${Number(v).toFixed(d)}%`);
 const SWING_REASON = {
-  target: "✅ 停利", stop: "🛑 停損", stop_lock: "🛑 跌停延後停損", time: "⏱ 時間出場",
+  target: "✅ 停利", trail: "📈 鎖利後移停出場", stop: "🛑 停損", stop_lock: "🛑 跌停延後停損", time: "⏱ 時間出場",
   limitup: "⛔ 開盤漲停買不到", nobar: "⛔ 無交易", open: "📌 持有中", pending: "🕘 待隔日開盤進場",
 };
 function swingSetupBadge(s) {
   const R = DB.swing.rules.setups || {};
   return (s.setups || [s.setup]).map((k) => `<span class="badge setup" title="${(R[k] || {}).desc || ""}">${(R[k] || {}).name || k}</span>`).join(" ");
+}
+function swingExitText(ex, pct) {
+  // 出場規則句子（卡片／持倉／說明共用）。鎖利移停模式（2026-11-05 採納）：目標價是「地板」不是賣點
+  const p = pct ?? ex.target_pct;
+  if (ex.lock_trail_pct) {
+    const floorDesc = ex.target_mode === "retrace"
+      ? `（地板＝回到起跌高點的 ${Math.round((ex.retrace_r ?? 0.5) * 100)}%，夾在 ${ex.target_min_pct ?? 8}～${ex.target_max_pct ?? 30}%，每檔不同）`
+      : "（地板）";
+    return `成交後停損 = 成交價 −${ex.stop_pct}%（跳空以開盤價出場、跌停鎖死順延次日開盤）；<b>第 ${ex.min_hold_days} 日起</b>觸及成交價 +${p}%${floorDesc}<b>不賣</b>，改追蹤收盤高點、回落 <b>${ex.lock_trail_pct}%</b> 出場（最差在地板賣；當天收盤守不住地板則直接在地板賣）；未觸及地板者第 ${ex.max_hold_days} 日收盤<b>市價出場</b>，鎖利後最多持有 ${ex.max_hold_locked ?? ex.max_hold_days} 日。`;
+  }
+  return `成交後停損 = 成交價 −${ex.stop_pct}%（跳空以開盤價出場、跌停鎖死順延次日開盤）；<b>第 ${ex.min_hold_days} 日起</b>觸及成交價 +${p}% 停利；第 ${ex.max_hold_days} 日收盤未出場則<b>市價出場</b>。`;
 }
 function swingSignalCard(s, rules) {
   const ex = s.rules || rules.exit;
@@ -918,11 +929,10 @@ function swingSignalCard(s, rules) {
     <div class="price-grid g3">
       <div><div class="lb">開盤價上限（漲停）</div><div class="v ah">${fmt2(s.limit_up_next)}</div></div>
       <div><div class="lb">參考停損（−${ex.stop_pct}%）</div><div class="v sl">${fmt2(s.ref_stop)}</div></div>
-      <div><div class="lb">參考停利（+${ex.target_pct}%）</div><div class="v tp">${fmt2(s.ref_target)}</div></div>
+      <div><div class="lb">${ex.lock_trail_pct ? "參考鎖利地板" : "參考停利"}（+${s.ref_target_pct ?? ex.target_pct}%）</div><div class="v tp">${fmt2(s.ref_target)}</div></div>
     </div>
     <div class="exit-rule">📋 執行：隔日 09:00 <b>開盤市價買進</b>；開盤價 ≥ <b>${fmt2(s.limit_up_next)}</b>（漲停）即<b>放棄</b>。
-      成交後停損 = 成交價 −${ex.stop_pct}%（跳空以開盤價出場、跌停鎖死順延次日開盤）；
-      <b>第 ${ex.min_hold_days} 日起</b>觸及成交價 +${ex.target_pct}% 停利；第 ${ex.max_hold_days} 日收盤未出場則<b>市價出場</b>。
+      ${swingExitText(ex, s.ref_target_pct)}
       <span class="muted">參考價以今日收盤推算，實際以成交價為準。</span></div>
   </div>`;
 }
@@ -1017,8 +1027,12 @@ function renderSwing() {
   const P = sw.positions || [];
   posBox.innerHTML = `<h3 class="swing-h3">📌 模擬持倉（${P.length}/${g.max_positions}）</h3>` +
     (P.length ? swingTradesTable(P) +
-      `<div class="notice small">持倉規則：停損 ${P.map((p) => `${p.code} ${fmt2(p.stop)}`).join("、")}；
-       第 ${EX.min_hold_days} 日起停利 ${P.map((p) => `${p.code} ${fmt2(p.target)}`).join("、")}；最多持有 ${EX.max_hold_days} 日。
+      `<div class="notice small">持倉規則：${P.map((p) => p.locked
+          ? `${p.code} <b>已鎖利</b>（地板 ${fmt2(p.floor ?? p.target)}、目前移停水位 ${fmt2(p.stop)}）`
+          : `${p.code} 停損 ${fmt2(p.stop)}／${(p.rules || EX).lock_trail_pct ? "鎖利地板" : "停利"} ${fmt2(p.target)}`).join("、")}；
+       ${EX.lock_trail_pct
+          ? `第 ${EX.min_hold_days} 日起觸及地板不賣、追蹤收盤高點回落 ${EX.lock_trail_pct}% 出場；未鎖利最多持有 ${EX.max_hold_days} 日、鎖利後 ${EX.max_hold_locked ?? EX.max_hold_days} 日。`
+          : `第 ${EX.min_hold_days} 日起停利；最多持有 ${EX.max_hold_days} 日。`}
        ${P.some((p) => p.lock) ? "⚠️ 有部位跌停鎖死，依規則次日開盤出場。" : ""}</div>`
       : `<div class="notice small">目前無持倉。</div>`);
 
@@ -1050,7 +1064,7 @@ function renderSwing() {
     <div class="s-item"><b>型態與排序</b><p>${Object.values(R.setups).map((s) => `${s.name}：${s.desc}`).join("；")}。同股同日兩者皆符合以前者計。<b>排序＝綜合分</b>：同日分位數加權「離 60 日高深度（被殺最深的先反彈，ρ +0.38）／量比低（量能失控的反彈日反而弱，ρ −0.17）／20 日均成交值大（閘門內 ρ +0.25）」；
       法人買賣超經檢驗無排序力（ρ ≈ 0）、20 日報酬與深度重疊、融資增減偏噪音，皆不採用。日內排序力本就有限（ρ 0.1～0.2）——閘門對不對遠比挑哪幾檔重要。
       排除處置股、ETF、持倉中或 ${R.dedup_days} 日內剛交易過的股票。</p></div>
-    <div class="s-item"><b>進出場與模擬</b><p>隔日開盤市價進場，開盤即漲停視為買不到；停損 −${EX.stop_pct}%（跳空以開盤價、跌停鎖死順延）；第 ${EX.min_hold_days} 日起 +${EX.target_pct}% 停利；第 ${EX.max_hold_days} 日收盤時間出場。
+    <div class="s-item"><b>進出場與模擬</b><p>隔日開盤市價進場，開盤即漲停視為買不到；${swingExitText(EX)}${EX.lock_trail_pct ? ` <span class="muted">2026-11-05 採納：原「第 5 日起 +15% 停利」的第 5 日限制來自需求而非實證；改成地板後移停在 3 年引擎重放 4 事件中 3 事件改善、官方與實際 64 筆反事實皆優（<a href="https://github.com/kenhuangads/stock-pick/blob/main/docs/swing_exit_research_2026-11-05.md" target="_blank" rel="noopener">研究</a>）。</span>` : ""}
       日K悲觀順序（同日先停損）。成本：手續費 ×2 ＋ 證交稅 0.3%（非當沖）。最多 ${R.max_positions} 檔、每檔權益 ${R.position_pct}%（${R.max_positions} 檔滿倉＝${R.max_positions * R.position_pct}%，可於 \`swing.position_pct\` 調整）${R.t2_max_positions > R.max_positions ? `；反彈確認日（T2）槽位可擴大到 ${R.t2_max_positions} 檔，需預留這部分資金` : ""}。</p></div>
     <div class="s-item"><b>限制</b><p>樣本只有 4 次 V 型反彈（2024-08、2025-04、2026-03、2026-07），沒有長空頭；反彈日隔天部分股票鎖漲停買不到，實際容量比表格小。
       完整研究：<a href="https://github.com/kenhuangads/stock-pick/blob/main/docs/swing_research.md" target="_blank" rel="noopener">docs/swing_research.md</a>。</p></div>`;

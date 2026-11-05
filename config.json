@@ -158,8 +158,15 @@
     "exit": {
       "stop_pct": 7,
       "target_pct": 15,
-      "min_hold_days": 5,
-      "max_hold_days": 10
+      "min_hold_days": 1,
+      "max_hold_days": 10,
+      "target_mode": "retrace",
+      "retrace_r": 0.5,
+      "target_min_pct": 8,
+      "target_max_pct": 30,
+      "lock_trail_pct": 8,
+      "max_hold_locked": 20,
+      "adopted": "2026-11-05"
     },
     "ranking": {
       "weights": {

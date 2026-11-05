@@ -205,6 +205,8 @@ def detect_signals(S, snaps, i, scfg):
                 vols.append(kj["v"])
         v_today = (snaps[i]["stocks"].get(code) or {}).get("v")
         vol_ratio = round(v_today / (sum(vols) / len(vols)), 2) if (vols and v_today) else None
+        hi_inc = max(highs + ([r["h"][i]] if r["h"][i] is not None else [])) if (highs or r["h"][i] is not None) else None
+        tp = _target_pct(ex, c, hi_inc) or ex.get("target_pct")
         out.append({
             "code": code, "name": r["n"], "market": r["m"], "setup": setups[0], "setups": setups,
             "close": c, "chg_pct": round(chg, 2),
@@ -214,7 +216,8 @@ def detect_signals(S, snaps, i, scfg):
             "vol_ratio": vol_ratio,
             "limit_up_next": limit_up_price(c),
             "ref_stop": round_tick(c * (1 - ex["stop_pct"] / 100), "down"),
-            "ref_target": round_tick(c * (1 + ex["target_pct"] / 100), "up"),
+            "ref_target": round_tick(c * (1 + tp / 100), "up") if tp else None,
+            "ref_target_pct": round(tp, 1) if tp else None,   # 鎖利地板（%）：retrace 模式每檔不同
             "rules": dict(ex),
         })
     _rank_signals(out, scfg.get("ranking") or {})
@@ -264,8 +267,35 @@ def swing_net(buy, sell, lots, fees_cfg, tax_rate, discount=None):
     return gross - fee_b - fee_s - tax, fee_b + fee_s + tax
 
 
+def _hi60(r, t, lookback=60):
+    """訊號日（含）往前 lookback 根的最高價＝起跌高點（地板式停利的空間參考）。"""
+    hs = [x for x in r["h"][max(0, t - lookback + 1):t + 1] if x is not None]
+    return max(hs) if hs else None
+
+
+def _target_pct(rules, ref_px, hi):
+    """停利／地板百分比。固定模式＝target_pct；target_mode="retrace"＝回到起跌高點的 retrace_r（預設 50%），
+    夾在 target_min_pct～target_max_pct（預設 8～30%）——跌得越深、離前高越遠，反彈空間越大
+    （3 年 1,316 筆：距 60 日高的空間與 10 日內高點 ρ +0.32；ATR +0.38；解釋力約一成，只能分級）。"""
+    if rules.get("target_mode") == "retrace" and hi and ref_px:
+        room = (hi / ref_px - 1) * 100
+        pct = (rules.get("retrace_r") or 0.5) * room
+        return max(rules.get("target_min_pct", 8), min(rules.get("target_max_pct", 30), pct))
+    return rules.get("target_pct")
+
+
 def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
-    """訊號日 t（索引）→ 隔日開盤進場、日K悲觀順序模擬到資料末端。"""
+    """訊號日 t（索引）→ 隔日開盤進場、日K悲觀順序模擬到資料末端。
+
+    出場規則（rules 隨單寫入，舊單照舊規則重放）：
+    - 停損 −stop_pct%（任何一天；跳空以開盤價出場、跌停鎖死順延次日開盤）
+    - 固定停利模式（無 lock_trail_pct）：第 min_hold_days 日起觸及 target 停利；max_hold_days 日收盤時間出場
+    - 鎖利移停模式（lock_trail_pct > 0，2026-11-05 採納）：target 是「地板」不是賣點——第 min_hold_days 日起
+      盤中觸及且收盤守住 → 鎖利，之後出場水位＝max(地板, 收盤高點×(1−lock_trail))，觸及即出（跳空以開盤價）；
+      觸及地板但當天收盤又跌回地板下 → 照固定模式在地板賣。未鎖利者 max_hold_days 日時間出場、鎖利後
+      max_hold_locked 日。地板可為固定 target_pct 或 target_mode=retrace 的自適應值（見 _target_pct）。
+      依據：3 年引擎重放 4 事件 3/4 改善、官方與實際 64 筆反事實皆優於固定 +15%（docs/swing_exit_research_2026-11-05.md）
+    - 純移停模式（trail_pct > 0，研究用、未採用）：停損水位＝max(硬停損, 進場後最高收盤×(1−trail))、不設停利"""
     r = S.get(code)
     n = len(r["c"])
     fi = t + 1
@@ -278,15 +308,20 @@ def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
         return {"status": "unfilled", "reason": "limitup", "open_next": r["o"][fi], "limit_up": lu}
     fill = r["o"][fi]
     hard = round_tick(fill * (1 - rules["stop_pct"] / 100), "down")
-    # 移動停損模式（rules.trail_pct > 0）：停損水位＝max(硬停損, 進場後最高收盤 × (1 − trail))，
-    # 每日收盤後上修、不設固定停利（3 年實證：崩跌環境 R1 固定 +15% 停利 +11.7% → 移停 12%/40 日 +16.3%）。
-    # 固定停利模式（trail_pct 缺省/0）：原規則——停損 −stop%、第 min_hold 日起 +target% 停利、max_hold 日時間出場。
     trail = (rules.get("trail_pct") or 0) / 100
+    lock_trail = (rules.get("lock_trail_pct") or 0) / 100
     stop, peak = hard, fill
-    target = round_tick(fill * (1 + rules["target_pct"] / 100), "up") if (rules.get("target_pct") and not trail) else None
+    tgt_pct = _target_pct(rules, fill, _hi60(r, t)) if not trail else None
+    target = round_tick(fill * (1 + tgt_pct / 100), "up") if tgt_pct else None
+    min_hold = rules.get("min_hold_days", 0)
+    max_hold = rules["max_hold_days"]
+    max_hold_locked = rules.get("max_hold_locked") or max_hold
     res = {"status": "open", "fill": fill, "fill_idx": fi, "stop": stop, "target": target,
-           "mfe_pct": 0.0, "mae_pct": 0.0, "lock": False, "trail_pct": rules.get("trail_pct") or None}
+           "target_pct": round(tgt_pct, 2) if tgt_pct else None,
+           "mfe_pct": 0.0, "mae_pct": 0.0, "lock": False, "trail_pct": rules.get("trail_pct") or None,
+           "locked": False, "floor": None, "peak": None}
     prevc, pend, last_j = r["c"][t], False, fi
+    locked_mode, floor = False, None
     for j in range(fi, n):
         o, h, l, c = r["o"][j], r["h"][j], r["l"][j], r["c"][j]
         if o is None or c is None:
@@ -294,27 +329,31 @@ def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
         d = j - fi
         last_j = j
         exit_px = reason = None
-        stop_reason = "trail" if (trail and stop > hard + 1e-9) else "stop"   # 水位已上修＝移動停損出場
         if pend:
             exit_px, reason = o, "stop_lock"
         else:
             locked = prevc is not None and c <= limit_down_price(prevc) + 1e-9 and l == c
-            if d >= 1 and o <= stop:
+            cur_stop = max(floor, round_tick(peak * (1 - lock_trail), "down")) if locked_mode else stop
+            stop_reason = "trail" if (locked_mode or (trail and stop > hard + 1e-9)) else "stop"
+            if d >= 1 and o <= cur_stop:
                 if locked and o == c:
                     pend = True
                 else:
                     exit_px, reason = o, stop_reason
-            elif l <= stop:
+            elif l <= cur_stop:
                 if locked:
                     pend = True
                 else:
-                    exit_px, reason = stop, stop_reason
-            if exit_px is None and not pend and target is not None and d >= rules.get("min_hold_days", 0):
-                if o >= target:
-                    exit_px, reason = o, "target"
-                elif h >= target:
-                    exit_px, reason = target, "target"
-            if exit_px is None and not pend and d >= rules["max_hold_days"]:
+                    exit_px, reason = cur_stop, stop_reason
+            if exit_px is None and not pend and target is not None and not locked_mode and d >= min_hold \
+                    and (o >= target or h >= target):
+                if lock_trail and c >= target:
+                    locked_mode, floor, peak = True, target, c   # 鎖利：地板成立、開始追蹤收盤高點
+                    res.update({"locked": True, "floor": floor, "peak": peak, "lock_idx": j,
+                                "stop": max(floor, round_tick(peak * (1 - lock_trail), "down"))})
+                else:
+                    exit_px, reason = (o if o >= target else target), "target"
+            if exit_px is None and not pend and d >= (max_hold_locked if locked_mode else max_hold):
                 exit_px, reason = c, "time"
         res["mfe_pct"] = round(max(res["mfe_pct"], (h / fill - 1) * 100), 2)
         res["mae_pct"] = round(min(res["mae_pct"], (l / fill - 1) * 100), 2)
@@ -327,6 +366,9 @@ def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
             peak = max(peak, c)
             stop = max(stop, round_tick(peak * (1 - trail), "down"))
             res["stop"], res["peak"] = stop, peak   # 持倉中顯示目前移停水位
+        elif locked_mode and not pend:
+            peak = max(peak, c)
+            res["peak"], res["stop"] = peak, max(floor, round_tick(peak * (1 - lock_trail), "down"))
         prevc = c
     res.update({"days": last_j - fi, "last": r["c"][last_j], "last_idx": last_j, "lock": pend,
                 "ret_pct": round((r["c"][last_j] / fill - 1) * 100, 2)})   # 未實現（未扣費）
@@ -447,15 +489,19 @@ def process(cfg, snaps, days, allow_new=True):
             base.update({"reason": r["reason"], "open_next": r.get("open_next"), "limit_up": r.get("limit_up"),
                          "fill_date": dates[x["idx"] + 1] if x["idx"] + 1 < n else None})
         elif r["status"] in ("open", "closed"):
+            rl = s.get("rules") or scfg["exit"]
             base.update({"fill": r["fill"], "fill_date": dates[r["fill_idx"]], "stop": r["stop"], "target": r["target"],
+                         "target_pct": r.get("target_pct"), "locked": bool(r.get("locked")),
+                         "floor": r.get("floor"), "peak": r.get("peak"),
                          "mfe_pct": r["mfe_pct"], "mae_pct": r["mae_pct"], "days": r["days"], "ret_pct": r["ret_pct"],
-                         "rules": s.get("rules") or scfg["exit"]})
+                         "rules": rl})
             if r["status"] == "closed":
                 base.update({"exit": r["exit"], "exit_date": dates[r["exit_idx"]], "reason": r["reason"],
                              "net": r["net"], "fees": r["fees"]})
             else:
+                mh = (rl.get("max_hold_locked") or rl["max_hold_days"]) if r.get("locked") else rl["max_hold_days"]
                 base.update({"last": r["last"], "last_date": dates[r["last_idx"]], "lock": r["lock"],
-                             "remaining_days": max(0, (s.get("rules") or scfg["exit"])["max_hold_days"] - r["days"])})
+                             "remaining_days": max(0, mh - r["days"])})
         return base
 
     peak_open = max((len(open_at(i)) for i in range(n)), default=0)   # 最高同時持倉（資金需求）
@@ -471,7 +517,7 @@ def process(cfg, snaps, days, allow_new=True):
             return {"n_closed": 0}
         rets = [r["ret_pct"] for r in c]
         return {"n_closed": len(c), "win_rate": round(sum(x > 0 for x in rets) / len(c) * 100, 1),
-                "hit_rate": round(sum(r["reason"] == "target" for r in c) / len(c) * 100, 1),
+                "hit_rate": round(sum(r["reason"] in ("target", "trail") for r in c) / len(c) * 100, 1),   # 達標＝觸及停利／地板
                 "stop_rate": round(sum(r["reason"].startswith("stop") for r in c) / len(c) * 100, 1),
                 "mean_ret_pct": round(sum(rets) / len(c), 2),
                 "median_days": sorted(r["days"] for r in c)[len(c) // 2],
