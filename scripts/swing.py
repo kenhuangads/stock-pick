@@ -545,7 +545,8 @@ def process(cfg, snaps, days, allow_new=True):
     hist = [{"date": dates[i], "mkt5": round(mkt5[i], 2) if mkt5[i] is not None else None,
              "ew": round(ew[i] * 100, 2) if ew[i] is not None else None,
              "breadth5": round(breadth5[i], 3) if breadth5[i] is not None else None,
-             "state": gate_state(mkt5[i], ew[i], scfg["gate"])[0]}
+             # 已入 ledger 的日子沿用當時紀錄的閘門狀態（門檻日後調整不改寫歷史標記，與事件／交易紀錄一致）
+             "state": (days.get(dates[i]) or {}).get("state") or gate_state(mkt5[i], ew[i], scfg["gate"])[0]}
             for i in range(max(0, n - scfg["history_days"]), n)]
     g_state, g_tier = gate_state(mkt5[-1], ew[-1], scfg["gate"])
     state_doc = {
