@@ -1110,7 +1110,8 @@ function renderSwing() {
   // 總覽與事件
   const S = sw.summary || {};
   sumBox.innerHTML = swingStatCards(S, `<div class="stat"><div class="lb">事件 / 閘門日</div><div class="v">${S.n_events || 0} / ${S.n_gate_days || 0}</div></div>
-    <div class="stat"><div class="lb">最高同時持倉（資金需求）</div><div class="v">${S.peak_open || 0} 檔 ≈ ${((S.peak_open || 0) * R.position_pct)}%</div></div>`);
+    <div class="stat"><div class="lb">資金需求（現行規則）</div><div class="v">${Math.max(R.max_positions, R.t2_max_positions || 0) * R.position_pct}%</div>
+      <div class="note">最多 ${Math.max(R.max_positions, R.t2_max_positions || 0)} 檔 × 每檔 ${R.position_pct}%${S.peak_open ? `<br>歷史最高同時 ${S.peak_open} 檔${S.peak_open_date ? `（${S.peak_open_date}${S.peak_open_cap ? `，當時上限 ${S.peak_open_cap} 檔` : ""}）` : ""}` : ""}</div></div>`);
   const split = tierSplitHtml(S.by_tier);
   $("#swingTierSplit").hidden = !split;
   $("#swingTierSplit").innerHTML = split ? `<b>依進場日層級</b>（T1＝深跌日、T2＝反彈確認日；滑過徽章看說明）<br>${split}` : "";

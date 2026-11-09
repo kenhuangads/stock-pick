@@ -505,7 +505,17 @@ def process(cfg, snaps, days, allow_new=True):
                              "remaining_days": max(0, mh - r["days"])})
         return base
 
-    peak_open = max((len(open_at(i)) for i in range(n)), default=0)   # 最高同時持倉（資金需求）
+    # 歷史最高同時持倉：只是事實紀錄——舊規則時期（上限 20／30 檔、每檔 5%）的峰值不能乘上現行每檔比重當資金需求
+    open_counts = [len(open_at(i)) for i in range(n)]
+    peak_open = max(open_counts, default=0)
+    peak_i = open_counts.index(peak_open) if peak_open else None
+    peak_cap = None
+    if peak_i is not None:
+        for j in range(peak_i, -1, -1):   # 峰值當時適用的槽位上限＝最近一個開閘日紀錄的上限
+            c = (days.get(dates[j]) or {}).get("cap")
+            if c:
+                peak_cap = c
+                break
     closed = [row(x) for x in taken if x["res"]["status"] == "closed"]
     positions = [row(x) for x in taken if x["res"]["status"] == "open"]
     pending = [row(x) for x in taken if x["res"]["status"] == "pending"]
@@ -569,7 +579,8 @@ def process(cfg, snaps, days, allow_new=True):
         "unfilled": sorted(unf, key=lambda r: r["signal_date"], reverse=True)[:60],
         "events": ev_out[::-1],
         "summary": {**stats(closed), "by_tier": by_tier(closed), "n_events": len(ev_out), "n_gate_days": len(gate_days),
-                    "n_taken": len(taken), "n_unfilled": len(unf), "n_open": len(positions), "peak_open": peak_open},
+                    "n_taken": len(taken), "n_unfilled": len(unf), "n_open": len(positions), "peak_open": peak_open,
+                    "peak_open_date": dates[peak_i] if peak_i is not None else None, "peak_open_cap": peak_cap},
         "rules": {"gate": scfg["gate"], "exit": scfg["exit"], "max_positions": scfg["max_positions"],
                   "t2_max_positions": max(scfg["max_positions"], scfg["t2_max_positions"]),
                   "position_pct": scfg["position_pct"], "lots": lots, "setups": SETUP_META,
