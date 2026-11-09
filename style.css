@@ -216,7 +216,7 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 .empty { text-align: center; color: var(--muted); padding: 40px 10px; font-size: 14px; }
 
 @media (min-width: 768px) {
-  .tabs { position: sticky; top: 57px; bottom: auto; border-top: 0; border-bottom: 1px solid var(--line); }
+  .tabs { position: sticky; top: var(--topbar-h, 57px); bottom: auto; border-top: 0; border-bottom: 1px solid var(--line); }
   .tab { flex-direction: row; gap: 6px; font-size: 14px; padding: 12px; }
   .tab .t-ico { font-size: 16px; }
   body { padding-bottom: 30px; }
@@ -290,8 +290,8 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
     display: grid; grid-template-columns: var(--side) minmax(0, 1fr); gap: 18px; align-items: start;
   }
   #picksInfo, #customForm {
-    grid-column: 1; grid-row: 1 / span 3; position: sticky; top: 112px;
-    max-height: calc(100vh - 128px); overflow: auto; margin-bottom: 0;
+    grid-column: 1; grid-row: 1 / span 3; position: sticky; top: calc(var(--sticky-top, 100px) + 12px);
+    max-height: calc(100vh - var(--sticky-top, 100px) - 28px); overflow: auto; margin-bottom: 0;
   }
   #picksList, #customList, #customInfo, #panel-picks > .explain { grid-column: 2; }
   #panel-picks > .explain { margin-top: 2px; }
@@ -309,3 +309,32 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
   .btn:hover { filter: brightness(1.08); }
   .day-block summary:hover { background: rgba(255,255,255,.025); }
 }
+
+/* ---------- 波段頁：快速跳轉列（捲動時固定在頂欄下方）、T1/T2 標記、候補收合 ---------- */
+.sec-nav {
+  position: sticky; top: var(--sticky-top, 57px); z-index: 15;
+  display: flex; gap: 6px; overflow-x: auto; padding: 8px 0; margin: -6px 0 10px;
+  background: var(--bg); box-shadow: 0 6px 10px -8px rgba(0,0,0,.7); scrollbar-width: none;
+}
+.sec-nav::-webkit-scrollbar { display: none; }
+.sec-nav button {
+  flex: 0 0 auto; border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 999px; padding: 7px 12px; font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.sec-nav button.active { border-color: var(--gold); color: var(--gold); }
+.sec-nav .cnt:not(:empty) { margin-left: 5px; background: rgba(245,192,78,.18); color: var(--gold); border-radius: 999px; padding: 0 6px; font-size: 11.5px; }
+#swingGauge, #swingToday, #swingPositions, #swingEventsSec, #swingRules { scroll-margin-top: calc(var(--sticky-top, 57px) + 58px); }
+.sec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 18px 0 8px; }
+.sec-head .swing-h3 { margin: 0; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; background: var(--card); }
+.seg button { background: none; border: 0; color: var(--muted); padding: 6px 12px; font-size: 12.5px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.active { background: rgba(245,192,78,.15); color: var(--gold); }
+#swingEvents.only-T1 tr[data-tier="T2"], #swingEvents.only-T2 tr[data-tier="T1"],
+#swingEvents.only-T1 tr[data-tier=""], #swingEvents.only-T2 tr[data-tier=""] { display: none; }
+.badge.t1 { background: rgba(255,140,60,.16); color: #ffb26b; border: 1px solid rgba(255,140,60,.5); }
+.badge.t2 { background: rgba(46,204,113,.15); color: #58d68d; border: 1px solid rgba(46,204,113,.4); }
+.trades td .badge { font-size: 10.5px; padding: 1px 7px; margin-left: 4px; vertical-align: 1px; }
+.cand-list { margin-top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+.cand-list summary { cursor: pointer; font-size: 13.5px; color: var(--muted); }
+.cand-list[open] summary { margin-bottom: 8px; }

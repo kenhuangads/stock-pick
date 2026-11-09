@@ -117,14 +117,29 @@
 
   <!-- ===== 波段（崩跌反彈） ===== -->
   <section class="panel" id="panel-swing">
+    <nav class="sec-nav" id="swingNav" aria-label="波段頁快速跳轉">
+      <button type="button" data-target="swingGauge">🌡 閘門</button>
+      <button type="button" data-target="swingToday">🟢 今日<span class="cnt" id="navTodayCnt"></span></button>
+      <button type="button" data-target="swingPositions">📌 持倉<span class="cnt" id="navPosCnt"></span></button>
+      <button type="button" data-target="swingEventsSec">📚 事件績效</button>
+      <button type="button" data-target="swingRules">📖 規則</button>
+    </nav>
     <div class="stat-row" id="swingGauge"></div>
     <div class="chart-card"><canvas id="swingChart"></canvas></div>
     <div id="swingToday"></div>
     <div id="swingPositions"></div>
-    <h3 class="swing-h3">📚 事件績效（一次崩跌＝一組）</h3>
+    <div class="sec-head" id="swingEventsSec">
+      <h3 class="swing-h3">📚 事件績效（一次崩跌＝一組）</h3>
+      <div class="seg" id="swingTierFilter" role="group" aria-label="依進場日閘門層級篩選交易">
+        <button type="button" data-f="all" class="active">全部</button>
+        <button type="button" data-f="T1">只看 T1</button>
+        <button type="button" data-f="T2">只看 T2</button>
+      </div>
+    </div>
     <div class="stat-row" id="swingSummary"></div>
+    <div class="notice small" id="swingTierSplit" hidden></div>
     <div id="swingEvents"></div>
-    <details class="explain">
+    <details class="explain" id="swingRules">
       <summary>📖 波段模組規則與研究依據（點開查看）</summary>
       <div id="swingExplain"></div>
     </details>

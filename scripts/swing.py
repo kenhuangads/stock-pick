@@ -482,7 +482,8 @@ def process(cfg, snaps, days, allow_new=True):
     # ---------- 輸出 state ----------
     def row(x):
         s, r = x["sig"], x["res"]
-        base = {"signal_date": x["date"], "code": s["code"], "name": s["name"], "market": s["market"],
+        base = {"signal_date": x["date"], "tier": (days.get(x["date"]) or {}).get("tier"),   # 訊號日閘門層級 T1/T2
+                "code": s["code"], "name": s["name"], "market": s["market"],
                 "setup": s["setup"], "setups": s["setups"], "rank": s.get("rank"), "close": s["close"],
                 "drawdown_pct": s["drawdown_pct"], "drop5_pct": s["drop5_pct"], "status": r["status"]}
         if r["status"] == "unfilled":
@@ -525,6 +526,10 @@ def process(cfg, snaps, days, allow_new=True):
                 "contrib_pct": round(sum(x * pp for x in rets), 2),
                 "net_ntd": sum(r["net"] for r in c)}
 
+    def by_tier(rows):
+        """依訊號日閘門層級拆分績效（T1 深跌日／T2 反彈確認日），供前端比較兩種進場日的表現。"""
+        return {t: stats([r for r in rows if r.get("tier") == t]) for t in ("T1", "T2")}
+
     ev_out = []
     for k, e in enumerate(events, 1):
         idxs = set(e["idxs"])
@@ -540,7 +545,7 @@ def process(cfg, snaps, days, allow_new=True):
                        "n_unfilled": sum(r["status"] == "unfilled" for r in rows_e),
                        "n_open": sum(r["status"] == "open" for r in rows_e),
                        "n_pending": sum(r["status"] == "pending" for r in rows_e),
-                       "stats": stats(rows_e), "trades": rows_e})
+                       "stats": dict(stats(rows_e), by_tier=by_tier(rows_e)), "trades": rows_e})
     today = days.get(dates[-1]) or {"date": dates[-1], "state": state, "tier": tier, "signals": []}
     hist = [{"date": dates[i], "mkt5": round(mkt5[i], 2) if mkt5[i] is not None else None,
              "ew": round(ew[i] * 100, 2) if ew[i] is not None else None,
@@ -563,7 +568,7 @@ def process(cfg, snaps, days, allow_new=True):
         "trades": sorted(closed, key=lambda r: (r["exit_date"], r["code"]), reverse=True),
         "unfilled": sorted(unf, key=lambda r: r["signal_date"], reverse=True)[:60],
         "events": ev_out[::-1],
-        "summary": {**stats(closed), "n_events": len(ev_out), "n_gate_days": len(gate_days),
+        "summary": {**stats(closed), "by_tier": by_tier(closed), "n_events": len(ev_out), "n_gate_days": len(gate_days),
                     "n_taken": len(taken), "n_unfilled": len(unf), "n_open": len(positions), "peak_open": peak_open},
         "rules": {"gate": scfg["gate"], "exit": scfg["exit"], "max_positions": scfg["max_positions"],
                   "t2_max_positions": max(scfg["max_positions"], scfg["t2_max_positions"]),

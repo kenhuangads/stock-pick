@@ -82,6 +82,47 @@ document.querySelectorAll(".tab").forEach((btn) =>
   })
 );
 
+/* ---------- 頂欄／分頁高度 → CSS 變數（快速跳轉列與桌機側欄的 sticky 位移）---------- */
+function syncStickyTop() {
+  const tb = document.querySelector(".topbar"), tabs = $("#tabs");
+  if (!tb || !tabs) return;
+  const tabsAtTop = getComputedStyle(tabs).position === "sticky";   // 手機：分頁在底部；桌機：分頁黏在頂欄下
+  document.documentElement.style.setProperty("--topbar-h", `${tb.offsetHeight}px`);
+  document.documentElement.style.setProperty("--sticky-top", `${tb.offsetHeight + (tabsAtTop ? tabs.offsetHeight : 0)}px`);
+}
+window.addEventListener("resize", syncStickyTop);
+if (window.ResizeObserver) new ResizeObserver(syncStickyTop).observe(document.querySelector(".topbar"));
+syncStickyTop();
+
+/* ---------- 波段頁：快速跳轉列＋T1/T2 篩選 ---------- */
+document.querySelectorAll("#swingNav button").forEach((b) => b.addEventListener("click", () => {
+  const el = document.getElementById(b.dataset.target);
+  if (!el) return;
+  if (el.tagName === "DETAILS") el.open = true;
+  el.scrollIntoView({ behavior: "smooth", block: "start" });
+}));
+document.querySelectorAll("#swingTierFilter button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll("#swingTierFilter button").forEach((x) => x.classList.toggle("active", x === b));
+  const ev = $("#swingEvents");
+  ev.classList.remove("only-T1", "only-T2");
+  if (b.dataset.f !== "all") ev.classList.add(`only-${b.dataset.f}`);
+}));
+let swingNavRaf = 0;
+window.addEventListener("scroll", () => {
+  // 捲動時標示目前所在段落
+  if (swingNavRaf || !$("#panel-swing").classList.contains("active")) return;
+  swingNavRaf = requestAnimationFrame(() => {
+    swingNavRaf = 0;
+    const off = (parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sticky-top")) || 57) + 70;
+    let cur = null;
+    document.querySelectorAll("#swingNav button").forEach((b) => {
+      const el = document.getElementById(b.dataset.target);
+      if (el && el.getBoundingClientRect().top <= off) cur = b;
+    });
+    document.querySelectorAll("#swingNav button").forEach((b) => b.classList.toggle("active", b === cur));
+  });
+}, { passive: true });
+
 /* ---------- 共用：個股卡片 ---------- */
 function riskBadgeHtml(p) {
   // 今日選股的事前風險標註：以建議張數計「觸停損最壞虧損」，比照復盤的風險閘門口徑
@@ -896,6 +937,20 @@ const SWING_REASON = {
   target: "✅ 停利", trail: "📈 鎖利後移停出場", stop: "🛑 停損", stop_lock: "🛑 跌停延後停損", time: "⏱ 時間出場",
   limitup: "⛔ 開盤漲停買不到", nobar: "⛔ 無交易", open: "📌 持有中", pending: "🕘 待隔日開盤進場",
 };
+const TIER_TIP = {
+  T1: "T1＝深跌日進場：等權 5 日跌幅達門檻、當日沒有反彈確認（3 年回測勝率約 47%）",
+  T2: "T2＝反彈確認日進場：深跌後當日等權反彈 ≥ +3%（3 年回測勝率約 96%）",
+};
+const tierBadge = (t) => (t ? `<span class="badge ${t === "T2" ? "t2" : "t1"}" title="${TIER_TIP[t] || ""}">${t}</span>` : "");
+function tierSplitHtml(bt) {
+  // 依訊號日閘門層級拆分的已平倉績效（T1 深跌日 vs T2 反彈確認日）
+  if (!bt) return "";
+  return ["T1", "T2"].map((t) => {
+    const st = bt[t];
+    if (!st || !st.n_closed) return "";
+    return `${tierBadge(t)} ${st.n_closed} 筆・勝率 ${st.win_rate}%・單筆均 <span class="${signCls(st.mean_ret_pct)}">${pctTxt(st.mean_ret_pct)}</span>・權益貢獻 <span class="${signCls(st.contrib_pct)}">${pctTxt(st.contrib_pct)}</span>`;
+  }).filter(Boolean).join("<br>");
+}
 function swingSetupBadge(s) {
   const R = DB.swing.rules.setups || {};
   return (s.setups || [s.setup]).map((k) => `<span class="badge setup" title="${(R[k] || {}).desc || ""}">${(R[k] || {}).name || k}</span>`).join(" ");
@@ -911,14 +966,14 @@ function swingExitText(ex, pct) {
   }
   return `成交後停損 = 成交價 −${ex.stop_pct}%（跳空以開盤價出場、跌停鎖死順延次日開盤）；<b>第 ${ex.min_hold_days} 日起</b>觸及成交價 +${p}% 停利；第 ${ex.max_hold_days} 日收盤未出場則<b>市價出場</b>。`;
 }
-function swingSignalCard(s, rules) {
+function swingSignalCard(s, rules, tier) {
   const ex = s.rules || rules.exit;
   const taken = s.taken;
   const badge = s.blocked ? `<span class="badge off">🚧 斷路器暫停</span>`
     : taken ? `<span class="badge taken">✅ 建議進場</span>` : `<span class="badge wait">候補（槽位已滿）</span>`;
   return `<div class="card${taken ? "" : " dim"}">
     <div class="head"><span class="rank">#${s.rank}</span><span class="code">${s.code}</span><span class="name">${s.name}</span>
-      <span class="mkt">${s.market === "tpex" ? "上櫃" : "上市"}</span>${badge}</div>
+      <span class="mkt">${s.market === "tpex" ? "上櫃" : "上市"}</span>${tierBadge(tier)}${badge}</div>
     <div class="px">收盤 <b>${fmt2(s.close)}</b> <span class="${signCls(s.chg_pct)}">${pctTxt(s.chg_pct)}</span></div>
     <div class="tags">${swingSetupBadge(s)}
       <span class="tag">離 60 日高 ${s.drawdown_pct == null ? "–" : "−" + Number(s.drawdown_pct).toFixed(1) + "%"}${s.hi_days < 60 ? `（僅 ${s.hi_days} 日資料）` : ""}</span>
@@ -936,6 +991,19 @@ function swingSignalCard(s, rules) {
       <span class="muted">參考價以今日收盤推算，實際以成交價為準。</span></div>
   </div>`;
 }
+function swingCandList(cands, tier, G) {
+  // 候補（未進場）收合成精簡表：閘門日常有上百檔訊號，全展開成卡片會讓手機捲很久
+  if (!cands.length) return "";
+  const why = tier === "T1" && G.t1_max_new ? `T1 日新進場上限 ${G.t1_max_new} 檔` : "槽位已滿";
+  const rows = cands.map((s) => `<tr><td class="lf">${s.rank}</td>
+    <td class="lf"><b>${s.code}</b> ${s.name}<div class="plan muted">${(s.setups || [s.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
+    <td>${fmt2(s.close)}</td><td class="${signCls(s.chg_pct)}">${pctTxt(s.chg_pct)}</td>
+    <td>${s.drawdown_pct == null ? "–" : "−" + Number(s.drawdown_pct).toFixed(1) + "%"}</td><td>${pctTxt(s.drop5_pct, 1)}</td>
+    <td>${s.vol_ratio != null ? Number(s.vol_ratio).toFixed(1) : "–"}</td><td>${s.score ?? "–"}</td></tr>`).join("");
+  return `<details class="cand-list"><summary>📋 候補 ${cands.length} 檔（${why}，未進場；點開看精簡清單）</summary>
+    <div class="tbl-wrap"><table class="trades"><thead><tr><th class="lf">#</th><th class="lf">股票／型態</th><th>收盤</th><th>漲跌</th><th>離 60 日高</th><th>5 日</th><th>量比</th><th>綜合分</th></tr></thead>
+    <tbody>${rows}</tbody></table></div></details>`;
+}
 function swingTradesTable(rows) {
   const tr = rows.map((t) => {
     const st = t.status;
@@ -945,8 +1013,8 @@ function swingTradesTable(rows) {
     const reason = st === "closed" ? SWING_REASON[t.reason] || t.reason
       : st === "unfilled" ? (SWING_REASON[t.reason] || t.reason) + (t.open_next != null ? `<div class="plan muted">開 ${fmt2(t.open_next)} ≥ 漲停 ${fmt2(t.limit_up)}</div>` : "")
       : SWING_REASON[st];
-    return `<tr class="${st === "unfilled" ? "dim" : ""}">
-      <td class="lf"><b>${t.code}</b> ${t.name}<div class="plan muted">${(t.setups || [t.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
+    return `<tr class="${st === "unfilled" ? "dim" : ""}" data-tier="${t.tier || ""}">
+      <td class="lf"><b>${t.code}</b> ${t.name}${tierBadge(t.tier)}<div class="plan muted">${(t.setups || [t.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
       <td>${t.signal_date}</td>
       <td>${t.fill != null ? fmt2(t.fill) : "–"}${t.fill_date && t.fill != null ? `<div class="plan muted">${t.fill_date}</div>` : ""}</td>
       <td>${exitTxt}</td>
@@ -1016,7 +1084,8 @@ function renderSwing() {
       共 ${T.signals.length} 檔，依<b>綜合分</b>（離 60 日高深度／低量比／成交值，同日分位數加權）排序，取前 ${takenN} 檔（槽位上限 ${g.cap_today}${T.tier === "T2" && g.cap_today > g.max_positions ? `，反彈確認日由 ${g.max_positions} 擴大` : ""}${T.tier === "T1" && T.t1_cap ? `；T1 日新進場上限 ${T.t1_cap} 檔` : ""}，已用 ${g.open_positions}），其餘候補。
       ${T.breaker ? `<br>🚧 斷路器：本事件最近兩批進場多數停損${R.breaker.block_entries ? "，已暫停 T1 新單" : "（僅提醒，未阻擋）"}。` : ""}
       <br><span class="small">${gateRule}</span></div>
-      <div class="cards">${T.signals.map((s) => swingSignalCard(s, R)).join("")}</div>`;
+      <div class="cards">${T.signals.filter((s) => s.taken || s.blocked).map((s) => swingSignalCard(s, R, T.tier)).join("")}</div>
+      ${swingCandList(T.signals.filter((s) => !s.taken && !s.blocked), T.tier, G)}`;
   } else {
     const warn = T.state === "warn" ? `🟡 <b>預警</b>：等權 5 日已跌 ${pctTxt(g.mkt5)}，接近閘門。` : "";
     todayBox.innerHTML = `<div class="notice">${warn || "⚪ <b>待命</b>：閘門未開啟，今日沒有波段建議單。"}
@@ -1025,6 +1094,8 @@ function renderSwing() {
 
   // 持倉
   const P = sw.positions || [];
+  $("#navTodayCnt").textContent = T.state === "open" ? String(takenN) : "";
+  $("#navPosCnt").textContent = P.length ? String(P.length) : "";
   posBox.innerHTML = `<h3 class="swing-h3">📌 模擬持倉（${P.length}/${g.max_positions}）</h3>` +
     (P.length ? swingTradesTable(P) +
       `<div class="notice small">持倉規則：${P.map((p) => p.locked
@@ -1040,6 +1111,9 @@ function renderSwing() {
   const S = sw.summary || {};
   sumBox.innerHTML = swingStatCards(S, `<div class="stat"><div class="lb">事件 / 閘門日</div><div class="v">${S.n_events || 0} / ${S.n_gate_days || 0}</div></div>
     <div class="stat"><div class="lb">最高同時持倉（資金需求）</div><div class="v">${S.peak_open || 0} 檔 ≈ ${((S.peak_open || 0) * R.position_pct)}%</div></div>`);
+  const split = tierSplitHtml(S.by_tier);
+  $("#swingTierSplit").hidden = !split;
+  $("#swingTierSplit").innerHTML = split ? `<b>依進場日層級</b>（T1＝深跌日、T2＝反彈確認日；滑過徽章看說明）<br>${split}` : "";
   const EV = sw.events || [];
   evBox.innerHTML = EV.length ? EV.map((e, i) => {
     const st = e.stats || {};
@@ -1049,7 +1123,7 @@ function renderSwing() {
       <summary><span class="d">事件 #${e.id} ${e.start}${e.end !== e.start ? ` ～ ${e.end}` : ""}</span>
         <span class="s">閘門 ${e.days.length} 日・訊號 ${e.n_signals}・進場 ${e.n_taken}（買不到 ${e.n_unfilled}）</span>
         <span class="pnl ${signCls(st.contrib_pct)}">${st.n_closed ? pctTxt(st.contrib_pct) : ""}</span></summary>
-      <div class="notice small" style="margin:0 10px 10px">${line}${st.n_closed ? `・持有 ≥5 日 ${st.hold5_rate}%・1 張合計 <span class="${signCls(st.net_ntd)}">${signTxt(st.net_ntd)}${fmt(st.net_ntd)}</span>` : ""}</div>
+      <div class="notice small" style="margin:0 10px 10px">${line}${st.n_closed ? `・持有 ≥5 日 ${st.hold5_rate}%・1 張合計 <span class="${signCls(st.net_ntd)}">${signTxt(st.net_ntd)}${fmt(st.net_ntd)}</span>` : ""}${tierSplitHtml(st.by_tier) ? `<br>${tierSplitHtml(st.by_tier)}` : ""}</div>
       <div class="tbl-wrap"><table class="trades"><thead><tr><th class="lf">閘門日</th><th>層級</th><th>等權 5 日</th><th>當日</th><th>訊號</th><th>取用</th><th class="lf"></th></tr></thead><tbody>${dayRows}</tbody></table></div>
       ${swingTradesTable(e.trades)}
     </details>`;
