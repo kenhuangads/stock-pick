@@ -339,3 +339,12 @@ dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
 .cand-list { margin-top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
 .cand-list summary { cursor: pointer; font-size: 13.5px; color: var(--muted); }
 .cand-list[open] summary { margin-bottom: 8px; }
+
+/* ---------- 可排序表格與綜合分回算標示 ---------- */
+table.sortable thead th[data-sort] { cursor: pointer; user-select: none; -webkit-user-select: none; }
+table.sortable thead th[data-sort]::after { content: " ⇅"; opacity: .35; font-size: 10px; }
+table.sortable thead th[data-dir="asc"]::after { content: " ▲"; opacity: 1; color: var(--gold); }
+table.sortable thead th[data-dir="desc"]::after { content: " ▼"; opacity: 1; color: var(--gold); }
+table.sortable thead th[data-dir] { color: var(--gold); }
+.score-bf { color: var(--muted); font-style: italic; }
+@media (hover: hover) { table.sortable thead th[data-sort]:hover { color: var(--text); } }

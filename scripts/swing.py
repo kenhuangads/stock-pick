@@ -480,11 +480,22 @@ def process(cfg, snaps, days, allow_new=True):
                 unfilled.append(x)
 
     # ---------- 輸出 state ----------
+    _bf_cache = {}
+
+    def backfill_score(i, code):
+        """綜合分上線（2026-10-20）前的舊訊號當時依離高深度排序、沒有綜合分。此處以現行公式對當日全部偵測訊號
+        重算同日分位數，只供前端分析對照（標示「回算」），不寫回 ledger（ledger 保留當時的紀錄）。"""
+        if i not in _bf_cache:
+            _bf_cache[i] = {y["code"]: y["score"] for y in detect_signals(S, snaps, i, scfg)}
+        return _bf_cache[i].get(code)
+
     def row(x):
         s, r = x["sig"], x["res"]
         base = {"signal_date": x["date"], "tier": (days.get(x["date"]) or {}).get("tier"),   # 訊號日閘門層級 T1/T2
                 "code": s["code"], "name": s["name"], "market": s["market"],
                 "setup": s["setup"], "setups": s["setups"], "rank": s.get("rank"), "close": s["close"],
+                "score": s.get("score"), "score_parts": s.get("score_parts"),
+                "score_bf": None if s.get("score") is not None else backfill_score(x["idx"], s["code"]),
                 "drawdown_pct": s["drawdown_pct"], "drop5_pct": s["drop5_pct"], "status": r["status"]}
         if r["status"] == "unfilled":
             base.update({"reason": r["reason"], "open_next": r.get("open_next"), "limit_up": r.get("limit_up"),

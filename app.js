@@ -123,6 +123,35 @@ window.addEventListener("scroll", () => {
   });
 }, { passive: true });
 
+/* ---------- 表格點擊排序（table.sortable；每格 data-v 為原始值，空值永遠排最後）---------- */
+document.addEventListener("click", (e) => {
+  const th = e.target.closest("table.sortable thead th");
+  if (!th || !th.dataset.sort) return;
+  const table = th.closest("table"), tbody = table.tBodies[0];
+  if (!tbody) return;
+  const idx = [...th.parentNode.children].indexOf(th);
+  const type = th.dataset.sort;
+  const first = th.dataset.first || (type === "text" ? "asc" : "desc");   // 數字／日期預設大到小、文字 A→Z
+  const dir = th.dataset.dir ? (th.dataset.dir === "asc" ? "desc" : "asc") : first;
+  table.querySelectorAll("thead th").forEach((x) => delete x.dataset.dir);
+  th.dataset.dir = dir;
+  const key = (r) => {
+    const c = r.cells[idx];
+    const raw = c ? (c.dataset.v ?? c.textContent.trim()) : "";
+    if (raw === "" || raw === "–") return null;
+    if (type === "num") { const n = parseFloat(raw); return Number.isFinite(n) ? n : null; }
+    return raw;
+  };
+  const sgn = dir === "asc" ? 1 : -1;
+  [...tbody.rows].map((r, i) => ({ r, i, k: key(r) }))
+    .sort((a, b) => {
+      if (a.k === null || b.k === null) return a.k === null && b.k === null ? a.i - b.i : a.k === null ? 1 : -1;
+      const c = type === "num" ? a.k - b.k : String(a.k).localeCompare(String(b.k), "zh-Hant");
+      return c ? c * sgn : a.i - b.i;
+    })
+    .forEach(({ r }) => tbody.appendChild(r));
+});
+
 /* ---------- 共用：個股卡片 ---------- */
 function riskBadgeHtml(p) {
   // 今日選股的事前風險標註：以建議張數計「觸停損最壞虧損」，比照復盤的風險閘門口徑
@@ -995,37 +1024,54 @@ function swingCandList(cands, tier, G) {
   // 候補（未進場）收合成精簡表：閘門日常有上百檔訊號，全展開成卡片會讓手機捲很久
   if (!cands.length) return "";
   const why = tier === "T1" && G.t1_max_new ? `T1 日新進場上限 ${G.t1_max_new} 檔` : "槽位已滿";
-  const rows = cands.map((s) => `<tr><td class="lf">${s.rank}</td>
-    <td class="lf"><b>${s.code}</b> ${s.name}<div class="plan muted">${(s.setups || [s.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
-    <td>${fmt2(s.close)}</td><td class="${signCls(s.chg_pct)}">${pctTxt(s.chg_pct)}</td>
-    <td>${s.drawdown_pct == null ? "–" : "−" + Number(s.drawdown_pct).toFixed(1) + "%"}</td><td>${pctTxt(s.drop5_pct, 1)}</td>
-    <td>${s.vol_ratio != null ? Number(s.vol_ratio).toFixed(1) : "–"}</td><td>${s.score ?? "–"}</td></tr>`).join("");
+  const rows = cands.map((s) => `<tr><td class="lf" data-v="${s.rank}">${s.rank}</td>
+    <td class="lf" data-v="${s.code}"><b>${s.code}</b> ${s.name}<div class="plan muted">${(s.setups || [s.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
+    <td data-v="${s.close}">${fmt2(s.close)}</td><td data-v="${s.chg_pct ?? ""}" class="${signCls(s.chg_pct)}">${pctTxt(s.chg_pct)}</td>
+    <td data-v="${s.drawdown_pct ?? ""}">${s.drawdown_pct == null ? "–" : "−" + Number(s.drawdown_pct).toFixed(1) + "%"}</td><td data-v="${s.drop5_pct ?? ""}">${pctTxt(s.drop5_pct, 1)}</td>
+    <td data-v="${s.vol_ratio ?? ""}">${s.vol_ratio != null ? Number(s.vol_ratio).toFixed(1) : "–"}</td><td data-v="${s.score ?? ""}">${s.score ?? "–"}</td></tr>`).join("");
   return `<details class="cand-list"><summary>📋 候補 ${cands.length} 檔（${why}，未進場；點開看精簡清單）</summary>
-    <div class="tbl-wrap"><table class="trades"><thead><tr><th class="lf">#</th><th class="lf">股票／型態</th><th>收盤</th><th>漲跌</th><th>離 60 日高</th><th>5 日</th><th>量比</th><th>綜合分</th></tr></thead>
+    <div class="tbl-wrap"><table class="trades sortable"><thead><tr><th class="lf" data-sort="num" data-first="asc">#</th><th class="lf" data-sort="text">股票／型態</th><th data-sort="num">收盤</th><th data-sort="num">漲跌</th><th data-sort="num">離 60 日高</th><th data-sort="num">5 日</th><th data-sort="num" data-first="asc">量比</th><th data-sort="num">綜合分</th></tr></thead>
     <tbody>${rows}</tbody></table></div></details>`;
 }
+function swingScoreCell(t) {
+  // 綜合分：建議當時的分數；綜合分上線前（2026-10-20 前）的舊訊號以現行公式回算並標「≈」
+  const sc = t.score ?? t.score_bf;
+  if (sc == null) return { v: "", html: "–" };
+  const rk = t.rank ? `<div class="plan muted">當時第 ${t.rank} 名</div>` : "";
+  if (t.score != null) {
+    const pt = t.score_parts ? `離高深度 ${t.score_parts.drawdown}／低量比 ${t.score_parts.low_vol_ratio}／成交值 ${t.score_parts.val_ma}（同日分位數）` : "";
+    return { v: sc, html: `<b title="${pt}">${Number(sc).toFixed(1)}</b>${rk}` };
+  }
+  return { v: sc, html: `<span class="score-bf" title="此訊號產生時尚未使用綜合分（當時依離 60 日高深度排序）；≈ 為以現行公式回算的同日分位數，供分析對照">≈${Number(sc).toFixed(1)}</span>${rk}` };
+}
 function swingTradesTable(rows) {
+  // 每格帶 data-v（排序用的原始值）；表頭 data-sort＝num／date／text
   const tr = rows.map((t) => {
     const st = t.status;
+    const exitV = st === "closed" ? t.exit : st === "open" ? t.last : "";
     const exitTxt = st === "closed" ? `${fmt2(t.exit)}<div class="plan muted">${t.exit_date}</div>`
       : st === "open" ? `${fmt2(t.last)}<div class="plan muted">${t.last_date} 現價</div>` : "–";
-    const ret = st === "closed" || st === "open" ? `<span class="${signCls(t.ret_pct)}">${pctTxt(t.ret_pct)}</span>` : "–";
+    const retV = st === "closed" || st === "open" ? t.ret_pct : "";
+    const ret = retV !== "" ? `<span class="${signCls(t.ret_pct)}">${pctTxt(t.ret_pct)}</span>` : "–";
+    const reasonKey = st === "closed" || st === "unfilled" ? t.reason : st;
     const reason = st === "closed" ? SWING_REASON[t.reason] || t.reason
       : st === "unfilled" ? (SWING_REASON[t.reason] || t.reason) + (t.open_next != null ? `<div class="plan muted">開 ${fmt2(t.open_next)} ≥ 漲停 ${fmt2(t.limit_up)}</div>` : "")
       : SWING_REASON[st];
+    const sc = swingScoreCell(t);
     return `<tr class="${st === "unfilled" ? "dim" : ""}" data-tier="${t.tier || ""}">
-      <td class="lf"><b>${t.code}</b> ${t.name}${tierBadge(t.tier)}<div class="plan muted">${(t.setups || [t.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
-      <td>${t.signal_date}</td>
-      <td>${t.fill != null ? fmt2(t.fill) : "–"}${t.fill_date && t.fill != null ? `<div class="plan muted">${t.fill_date}</div>` : ""}</td>
-      <td>${exitTxt}</td>
-      <td class="lf">${reason}</td>
-      <td>${t.days != null ? t.days : "–"}</td>
-      <td>${ret}</td>
-      <td class="${st === "closed" ? signCls(t.net) : ""}">${st === "closed" ? signTxt(t.net) + fmt(t.net) : "–"}</td>
+      <td class="lf" data-v="${t.code}"><b>${t.code}</b> ${t.name}${tierBadge(t.tier)}<div class="plan muted">${(t.setups || [t.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
+      <td data-v="${t.signal_date}">${t.signal_date}</td>
+      <td data-v="${sc.v}">${sc.html}</td>
+      <td data-v="${t.fill ?? ""}">${t.fill != null ? fmt2(t.fill) : "–"}${t.fill_date && t.fill != null ? `<div class="plan muted">${t.fill_date}</div>` : ""}</td>
+      <td data-v="${exitV ?? ""}">${exitTxt}</td>
+      <td class="lf" data-v="${reasonKey || ""}">${reason}</td>
+      <td data-v="${t.days ?? ""}">${t.days != null ? t.days : "–"}</td>
+      <td data-v="${retV ?? ""}">${ret}</td>
+      <td data-v="${st === "closed" ? t.net : ""}" class="${st === "closed" ? signCls(t.net) : ""}">${st === "closed" ? signTxt(t.net) + fmt(t.net) : "–"}</td>
     </tr>`;
   }).join("");
-  return `<div class="tbl-wrap"><table class="trades">
-    <thead><tr><th class="lf">股票／型態</th><th>訊號日</th><th>成交</th><th>出場／現價</th><th class="lf">結果</th><th>持有日</th><th>報酬</th><th>1 張淨損益</th></tr></thead>
+  return `<div class="tbl-wrap"><table class="trades sortable">
+    <thead><tr><th class="lf" data-sort="text">股票／型態</th><th data-sort="date">訊號日</th><th data-sort="num" title="建議當時的綜合分（≈＝綜合分上線前的舊訊號，以現行公式回算）">綜合分</th><th data-sort="num">成交</th><th data-sort="num">出場／現價</th><th class="lf" data-sort="text">結果</th><th data-sort="num">持有日</th><th data-sort="num">報酬</th><th data-sort="num">1 張淨損益</th></tr></thead>
     <tbody>${tr}</tbody></table></div>`;
 }
 function swingStatCards(st, extra = "") {
@@ -1114,18 +1160,19 @@ function renderSwing() {
       <div class="note">最多 ${Math.max(R.max_positions, R.t2_max_positions || 0)} 檔 × 每檔 ${R.position_pct}%${S.peak_open ? `<br>歷史最高同時 ${S.peak_open} 檔${S.peak_open_date ? `（${S.peak_open_date}${S.peak_open_cap ? `，當時上限 ${S.peak_open_cap} 檔` : ""}）` : ""}` : ""}</div></div>`);
   const split = tierSplitHtml(S.by_tier);
   $("#swingTierSplit").hidden = !split;
-  $("#swingTierSplit").innerHTML = split ? `<b>依進場日層級</b>（T1＝深跌日、T2＝反彈確認日；滑過徽章看說明）<br>${split}` : "";
+  $("#swingTierSplit").innerHTML = split ? `<b>依進場日層級</b>（T1＝深跌日、T2＝反彈確認日；滑過徽章看說明）<br>${split}
+    <div class="muted" style="margin-top:4px">💡 表格表頭可點擊排序（再點一次反向）。綜合分為建議當時的分數；標「≈」者為 2026-10-20 綜合分上線前的訊號（當時依離 60 日高深度排序），以現行公式回算供對照。</div>` : "";
   const EV = sw.events || [];
   evBox.innerHTML = EV.length ? EV.map((e, i) => {
     const st = e.stats || {};
     const line = st.n_closed ? `勝率 ${st.win_rate}%・達標 ${st.hit_rate}%・單筆均 <span class="${signCls(st.mean_ret_pct)}">${pctTxt(st.mean_ret_pct)}</span>・權益貢獻 <span class="${signCls(st.contrib_pct)}">${pctTxt(st.contrib_pct)}</span>` : "尚未平倉";
-    const dayRows = e.days.map((d) => `<tr><td class="lf">${d.date}</td><td>${d.tier}</td><td class="${signCls(d.mkt5)}">${pctTxt(d.mkt5)}</td><td class="${signCls(d.ew)}">${pctTxt(d.ew)}</td><td>${d.n_signals}</td><td>${d.n_taken}${d.cap != null ? `<div class="plan muted">上限 ${d.cap}・既有 ${d.open_before ?? 0}</div>` : ""}</td><td class="lf">${d.breaker ? "🚧" : ""}</td></tr>`).join("");
+    const dayRows = e.days.map((d) => `<tr><td class="lf" data-v="${d.date}">${d.date}</td><td data-v="${d.tier || ""}">${tierBadge(d.tier) || "–"}</td><td data-v="${d.mkt5 ?? ""}" class="${signCls(d.mkt5)}">${pctTxt(d.mkt5)}</td><td data-v="${d.ew ?? ""}" class="${signCls(d.ew)}">${pctTxt(d.ew)}</td><td data-v="${d.n_signals}">${d.n_signals}</td><td data-v="${d.n_taken}">${d.n_taken}${d.cap != null ? `<div class="plan muted">上限 ${d.cap}・既有 ${d.open_before ?? 0}</div>` : ""}</td><td class="lf">${d.breaker ? "🚧" : ""}</td></tr>`).join("");
     return `<details class="day-block"${i === 0 ? " open" : ""}>
       <summary><span class="d">事件 #${e.id} ${e.start}${e.end !== e.start ? ` ～ ${e.end}` : ""}</span>
         <span class="s">閘門 ${e.days.length} 日・訊號 ${e.n_signals}・進場 ${e.n_taken}（買不到 ${e.n_unfilled}）</span>
         <span class="pnl ${signCls(st.contrib_pct)}">${st.n_closed ? pctTxt(st.contrib_pct) : ""}</span></summary>
       <div class="notice small" style="margin:0 10px 10px">${line}${st.n_closed ? `・持有 ≥5 日 ${st.hold5_rate}%・1 張合計 <span class="${signCls(st.net_ntd)}">${signTxt(st.net_ntd)}${fmt(st.net_ntd)}</span>` : ""}${tierSplitHtml(st.by_tier) ? `<br>${tierSplitHtml(st.by_tier)}` : ""}</div>
-      <div class="tbl-wrap"><table class="trades"><thead><tr><th class="lf">閘門日</th><th>層級</th><th>等權 5 日</th><th>當日</th><th>訊號</th><th>取用</th><th class="lf"></th></tr></thead><tbody>${dayRows}</tbody></table></div>
+      <div class="tbl-wrap"><table class="trades sortable"><thead><tr><th class="lf" data-sort="date">閘門日</th><th data-sort="text">層級</th><th data-sort="num">等權 5 日</th><th data-sort="num">當日</th><th data-sort="num">訊號</th><th data-sort="num">取用</th><th class="lf"></th></tr></thead><tbody>${dayRows}</tbody></table></div>
       ${swingTradesTable(e.trades)}
     </details>`;
   }).join("") : `<div class="empty">尚無事件（資料期間內市場未出現急跌）。</div>`;
