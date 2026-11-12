@@ -1074,6 +1074,73 @@ function swingTradesTable(rows) {
     <thead><tr><th class="lf" data-sort="text">股票／型態</th><th data-sort="date">訊號日</th><th data-sort="num" title="建議當時的綜合分（≈＝綜合分上線前的舊訊號，以現行公式回算）">綜合分</th><th data-sort="num">成交</th><th data-sort="num">出場／現價</th><th class="lf" data-sort="text">結果</th><th data-sort="num">持有日</th><th data-sort="num">報酬</th><th data-sort="num">1 張淨損益</th></tr></thead>
     <tbody>${tr}</tbody></table></div>`;
 }
+function swingPositionsTable(P, EX) {
+  // 持倉專用表：每檔的「停損／移停」與「鎖利地板」直接成欄，附距現價百分比與位置條（停損 → 地板）
+  const setupTxt = (p) => (p.setups || [p.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋");
+  const dist = (px, now) => (px != null && now ? (px / now - 1) * 100 : null);
+  const clamp = (x) => Math.min(100, Math.max(0, x));
+  const rows = P.map((p) => {
+    const rl = p.rules || EX, lockMode = !!rl.lock_trail_pct, now = p.last;
+    const stopD = dist(p.stop, now), tgtD = dist(p.target, now);
+    const sc = swingScoreCell(p);
+    // 防守價：未鎖利＝停損；已鎖利＝移停水位（max(地板, 收盤高點 × (1 − 移停%))）
+    const guard = p.locked
+      ? `<b class="gold" title="鎖利後的移停水位＝max(地板, 收盤高點 × (1 − ${rl.lock_trail_pct}%))">🔒 ${fmt2(p.stop)}</b><div class="plan muted">移停・距 ${pctTxt(stopD, 1)}</div>`
+      : `<b class="down" title="停損＝成交價 −${rl.stop_pct}%；跌破即出場（跳空以開盤價）">${fmt2(p.stop)}</b><div class="plan muted">距 ${pctTxt(stopD, 1)}</div>`;
+    // 目標：新規則＝鎖利地板（觸及且收盤守住即鎖利）；舊規則＝固定停利
+    const goalLb = lockMode ? `鎖利地板${p.target_pct ? ` +${Number(p.target_pct).toFixed(0)}%` : ""}`
+      : `停利 +${rl.target_pct}%${rl.min_hold_days > 1 ? `（第 ${rl.min_hold_days} 日起）` : ""}`;
+    const goal = p.locked
+      ? `<b class="up" title="已鎖利：最差在地板價賣出">✅ ${fmt2(p.floor ?? p.target)}</b><div class="plan muted">已鎖利</div>`
+      : `<b class="up" title="${goalLb}（相對成交價）">${fmt2(p.target)}</b><div class="plan muted">差 ${pctTxt(tgtD, 1)}<span class="hide-sm">（${goalLb}）</span></div>`;
+    // 位置條：未鎖利＝停損 → 地板（│成交價、●現價）；已鎖利＝地板 → 收盤高點
+    const lo = p.locked ? (p.floor ?? p.target) : p.stop;
+    const hi = p.locked ? Math.max(p.peak ?? now, now) : p.target;
+    const posPct = hi > lo ? clamp((now - lo) / (hi - lo) * 100) : 50;
+    const fillPct = !p.locked && hi > lo ? clamp((p.fill - lo) / (hi - lo) * 100) : null;
+    const barTip = p.locked
+      ? `地板 ${fmt2(lo)} ←→ 收盤高點 ${fmt2(hi)}；現價 ${fmt2(now)}`
+      : `停損 ${fmt2(lo)} ←→ ${lockMode ? "鎖利地板" : "停利"} ${fmt2(hi)}；成交 ${fmt2(p.fill)}、現價 ${fmt2(now)}`;
+    const bar = `<div class="pbar${p.locked ? " locked" : ""}" title="${barTip}">${fillPct != null ? `<i class="fp" style="left:${fillPct}%"></i>` : ""}<i class="np" style="left:${posPct}%"></i></div>`;
+    const status = p.lock ? `<span class="down">⚠️ 跌停鎖死・次日開盤出場</span>`
+      : p.locked ? `🔒 已鎖利・高點 ${fmt2(p.peak)}`
+      : lockMode ? "未鎖利"
+      : (p.days < rl.min_hold_days ? `第 ${rl.min_hold_days} 日起可停利` : "可停利");
+    return `<tr data-tier="${p.tier || ""}">
+      <td class="lf sticky-col" data-v="${p.code}"><b>${p.code}</b> ${p.name}${tierBadge(p.tier)}<div class="plan muted hide-sm">${setupTxt(p)}</div></td>
+      <td data-v="${p.ret_pct ?? ""}"><b class="${signCls(p.ret_pct)}">${pctTxt(p.ret_pct)}</b><div class="plan muted">現價 ${fmt2(now)}</div></td>
+      <td data-v="${stopD ?? ""}">${guard}</td>
+      <td data-v="${p.locked ? -1 : (tgtD ?? "")}">${goal}</td>
+      <td data-v="${posPct.toFixed(1)}">${bar}<div class="plan muted">${status}</div></td>
+      <td data-v="${p.fill}">${fmt2(p.fill)}<div class="plan muted">${p.fill_date}</div></td>
+      <td data-v="${p.remaining_days ?? ""}">${p.days} 日<div class="plan muted">剩 ${p.remaining_days} 日</div></td>
+      <td data-v="${sc.v}">${sc.html}</td>
+      <td data-v="${p.signal_date}">${p.signal_date}</td>
+    </tr>`;
+  }).join("");
+  // 頂部重點：平均未實現、最接近停損、最接近地板、鎖利檔數
+  const withD = P.map((p) => ({ p, sd: dist(p.stop, p.last), td: p.locked ? null : dist(p.target, p.last) }));
+  const nearStop = withD.filter((x) => x.sd != null).sort((a, b) => b.sd - a.sd)[0];
+  const nearGoal = withD.filter((x) => x.td != null).sort((a, b) => a.td - b.td)[0];
+  const avg = P.reduce((a, p) => a + (p.ret_pct || 0), 0) / P.length;
+  const sum = `<div class="pos-sum">
+    <span>平均未實現 <b class="${signCls(avg)}">${pctTxt(avg)}</b></span>
+    ${nearStop ? `<span>最接近停損：<b>${nearStop.p.code} ${nearStop.p.name}</b> 距 <b class="down">${pctTxt(nearStop.sd, 1)}</b></span>` : ""}
+    ${nearGoal ? `<span>最接近地板：<b>${nearGoal.p.code} ${nearGoal.p.name}</b> 差 <b class="up">${pctTxt(nearGoal.td, 1)}</b></span>` : ""}
+    <span>已鎖利 <b>${P.filter((p) => p.locked).length}</b>／${P.length}</span>
+    ${P.some((p) => p.lock) ? `<span class="down">⚠️ 有部位跌停鎖死，次日開盤出場</span>` : ""}</div>`;
+  const ruleTxt = EX.lock_trail_pct
+    ? `<b>停損</b>：跌破即出場（跳空以開盤價）。<b>鎖利地板</b>：第 ${EX.min_hold_days} 日起盤中觸及且收盤守住即鎖利，之後追蹤收盤高點、回落 ${EX.lock_trail_pct}% 出場（最差在地板賣）；觸及但收盤守不住則當天在地板賣。未鎖利最多持有 ${EX.max_hold_days} 日、鎖利後 ${EX.max_hold_locked ?? EX.max_hold_days} 日。`
+    : `<b>停損</b>：跌破即出場。<b>停利</b>：第 ${EX.min_hold_days} 日起觸及即賣；最多持有 ${EX.max_hold_days} 日。`;
+  return sum + `<div class="tbl-wrap"><table class="trades sortable pos-table">
+    <thead><tr><th class="lf sticky-col" data-sort="text">股票</th><th data-sort="num">報酬<span class="hide-sm">／現價</span></th>
+      <th data-sort="num" title="現價距停損（或鎖利後的移停水位）的百分比；點擊排序＝最接近停損的在前">停損<span class="hide-sm">／移停</span></th>
+      <th data-sort="num" data-first="asc" title="現價距鎖利地板的百分比；點擊排序＝最接近地板的在前"><span class="hide-sm">鎖利</span>地板</th>
+      <th data-sort="num" title="左端＝停損、右端＝鎖利地板；│＝成交價、●＝現價（鎖利後改為 地板 → 收盤高點）">位置／狀態</th>
+      <th data-sort="num">成交</th><th data-sort="num" data-first="asc">持有／剩餘</th><th data-sort="num">綜合分</th><th data-sort="date">訊號日</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="notice small pos-rule">${ruleTxt}<br><span class="muted">位置條：左端＝停損、右端＝鎖利地板，<span class="gold">│</span>＝成交價、●＝現價；鎖利後改為「地板 → 收盤高點」。表頭可點擊排序。</span></div>`;
+}
 function swingStatCards(st, extra = "") {
   if (!st || !st.n_closed) return `<div class="stat"><div class="lb">已平倉</div><div class="v">0 筆</div></div>${extra}`;
   return `<div class="stat"><div class="lb">已平倉</div><div class="v">${st.n_closed} 筆</div></div>
@@ -1142,16 +1209,9 @@ function renderSwing() {
   const P = sw.positions || [];
   $("#navTodayCnt").textContent = T.state === "open" ? String(takenN) : "";
   $("#navPosCnt").textContent = P.length ? String(P.length) : "";
-  posBox.innerHTML = `<h3 class="swing-h3">📌 模擬持倉（${P.length}/${g.max_positions}）</h3>` +
-    (P.length ? swingTradesTable(P) +
-      `<div class="notice small">持倉規則：${P.map((p) => p.locked
-          ? `${p.code} <b>已鎖利</b>（地板 ${fmt2(p.floor ?? p.target)}、目前移停水位 ${fmt2(p.stop)}）`
-          : `${p.code} 停損 ${fmt2(p.stop)}／${(p.rules || EX).lock_trail_pct ? "鎖利地板" : "停利"} ${fmt2(p.target)}`).join("、")}；
-       ${EX.lock_trail_pct
-          ? `第 ${EX.min_hold_days} 日起觸及地板不賣、追蹤收盤高點回落 ${EX.lock_trail_pct}% 出場；未鎖利最多持有 ${EX.max_hold_days} 日、鎖利後 ${EX.max_hold_locked ?? EX.max_hold_days} 日。`
-          : `第 ${EX.min_hold_days} 日起停利；最多持有 ${EX.max_hold_days} 日。`}
-       ${P.some((p) => p.lock) ? "⚠️ 有部位跌停鎖死，依規則次日開盤出場。" : ""}</div>`
-      : `<div class="notice small">目前無持倉。</div>`);
+  const lastPx = P[0]?.last_date ? `<span class="muted small">　現價為 ${P[0].last_date} 收盤</span>` : "";
+  posBox.innerHTML = `<h3 class="swing-h3">📌 模擬持倉（${P.length}/${g.max_positions}）${lastPx}</h3>` +
+    (P.length ? swingPositionsTable(P, EX) : `<div class="notice small">目前無持倉。</div>`);
 
   // 總覽與事件
   const S = sw.summary || {};

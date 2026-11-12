@@ -348,3 +348,26 @@ table.sortable thead th[data-dir="desc"]::after { content: " ▼"; opacity: 1; c
 table.sortable thead th[data-dir] { color: var(--gold); }
 .score-bf { color: var(--muted); font-style: italic; }
 @media (hover: hover) { table.sortable thead th[data-sort]:hover { color: var(--text); } }
+
+/* ---------- 波段持倉表：停損／地板成欄、位置條、首欄固定 ---------- */
+.gold { color: var(--gold); }
+.pos-sum { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--muted); margin: 0 0 8px; }
+.pos-sum b { color: var(--text); }
+.pos-sum b.up { color: var(--up); } .pos-sum b.down { color: var(--down); }
+.pos-table td b { font-size: 13.5px; }
+.pbar {
+  position: relative; height: 8px; min-width: 120px; border-radius: 99px; margin: 7px 4px 5px;
+  background: linear-gradient(90deg, rgba(46,204,113,.6), rgba(147,164,184,.22) 50%, rgba(255,93,82,.6));
+}
+.pbar.locked { background: linear-gradient(90deg, rgba(245,192,78,.5), rgba(255,93,82,.7)); }
+.pbar i { position: absolute; top: 50%; transform: translate(-50%, -50%); }
+.pbar i.np { width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 2px var(--bg); }
+.pbar i.fp { width: 2px; height: 16px; background: var(--gold); border-radius: 1px; }
+.pos-table .sticky-col { position: sticky; left: 0; z-index: 1; background: var(--bg); box-shadow: 1px 0 0 var(--line); }
+.pos-table thead .sticky-col { z-index: 2; }
+.pos-rule { margin-top: 8px; }
+@media (max-width: 600px) {
+  .hide-sm { display: none; }
+  .pos-table th, .pos-table td { padding: 7px 5px; }
+  .pos-table td b { font-size: 13px; }
+}
