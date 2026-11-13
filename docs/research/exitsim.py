@@ -107,7 +107,8 @@ def make(S, N, fees, lots, tax, mkt5=None, ew=None):
             elif locked_mode and not pend:
                 peak = max(peak, c)
             prevc = c
-        return {"status": "open", "fill": fill, "fill_idx": fi, "mfe": mfe * 100, "mae": mae * 100, "first15": first15}
+        return {"status": "open", "fill": fill, "fill_idx": fi, "mfe": mfe * 100, "mae": mae * 100, "first15": first15,
+                "tgt_pct": tgt_pct, "locked": locked_mode}
 
     return sim, features
 
