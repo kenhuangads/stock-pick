@@ -316,7 +316,7 @@ def simulate_signal(S, code, t, rules, fees_cfg, lots, tax_rate):
     min_hold = rules.get("min_hold_days", 0)
     max_hold = rules["max_hold_days"]
     max_hold_locked = rules.get("max_hold_locked") or max_hold
-    res = {"status": "open", "fill": fill, "fill_idx": fi, "stop": stop, "target": target,
+    res = {"status": "open", "fill": fill, "fill_idx": fi, "stop": stop, "stop0": hard, "target": target,
            "target_pct": round(tgt_pct, 2) if tgt_pct else None,
            "mfe_pct": 0.0, "mae_pct": 0.0, "lock": False, "trail_pct": rules.get("trail_pct") or None,
            "locked": False, "floor": None, "peak": None}
@@ -496,13 +496,16 @@ def process(cfg, snaps, days, allow_new=True):
                 "setup": s["setup"], "setups": s["setups"], "rank": s.get("rank"), "close": s["close"],
                 "score": s.get("score"), "score_parts": s.get("score_parts"),
                 "score_bf": None if s.get("score") is not None else backfill_score(x["idx"], s["code"]),
+                # 建議當時卡片上的參考價（依訊號日收盤推算），供「最初預估 vs 最終結果」對照
+                "ref_stop": s.get("ref_stop"), "ref_target": s.get("ref_target"), "ref_target_pct": s.get("ref_target_pct"),
                 "drawdown_pct": s["drawdown_pct"], "drop5_pct": s["drop5_pct"], "status": r["status"]}
         if r["status"] == "unfilled":
             base.update({"reason": r["reason"], "open_next": r.get("open_next"), "limit_up": r.get("limit_up"),
                          "fill_date": dates[x["idx"] + 1] if x["idx"] + 1 < n else None})
         elif r["status"] in ("open", "closed"):
             rl = s.get("rules") or scfg["exit"]
-            base.update({"fill": r["fill"], "fill_date": dates[r["fill_idx"]], "stop": r["stop"], "target": r["target"],
+            base.update({"fill": r["fill"], "fill_date": dates[r["fill_idx"]], "stop": r["stop"], "stop0": r.get("stop0"),
+                         "target": r["target"],
                          "target_pct": r.get("target_pct"), "locked": bool(r.get("locked")),
                          "floor": r.get("floor"), "peak": r.get("peak"),
                          "mfe_pct": r["mfe_pct"], "mae_pct": r["mae_pct"], "days": r["days"], "ret_pct": r["ret_pct"],

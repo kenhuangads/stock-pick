@@ -371,3 +371,7 @@ table.sortable thead th[data-dir] { color: var(--gold); }
   .pos-table th, .pos-table td { padding: 7px 5px; }
   .pos-table td b { font-size: 13px; }
 }
+
+/* 事件交易表：首欄固定（橫向捲動時股票名稱留在左側） */
+.day-block .trades .sticky-col { position: sticky; left: 0; z-index: 1; background: var(--card); box-shadow: 1px 0 0 var(--line); }
+.day-block .trades thead .sticky-col { z-index: 2; }

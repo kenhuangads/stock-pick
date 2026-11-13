@@ -1044,6 +1044,29 @@ function swingScoreCell(t) {
   }
   return { v: sc, html: `<span class="score-bf" title="此訊號產生時尚未使用綜合分（當時依離 60 日高深度排序）；≈ 為以現行公式回算的同日分位數，供分析對照">≈${Number(sc).toFixed(1)}</span>${rk}` };
 }
+function swingPlanCell(ref, act, tag) {
+  // 建議時的參考價（依訊號日收盤）為主；依實際成交價計算的觸發價不同時列在下方
+  const main = ref ?? act;
+  if (main == null) return { v: "", html: "–" };
+  const sub = act != null && ref != null && Math.abs(act - ref) > 1e-9 ? `<div class="plan muted">成交後 ${fmt2(act)}</div>` : "";
+  return { v: main, html: `<b>${fmt2(main)}</b>${tag ? ` <span class="muted small">${tag}</span>` : ""}${sub}` };
+}
+function swingVsPlan(t) {
+  // 最終結果與計畫的差異（出場價 vs 依成交價計算的停損／停利）
+  if (t.status !== "closed") return "";
+  const tg = t.floor ?? t.target, sp = t.stop0 ?? t.stop;
+  if ((t.reason === "stop" || t.reason === "stop_lock") && sp) {
+    const slip = (t.exit / sp - 1) * 100;
+    return slip < -0.05 ? `低於停損價 ${Math.abs(slip).toFixed(1)}%${t.reason === "stop_lock" ? "（跌停鎖死順延）" : "（跳空開低）"}` : "停損價出場";
+  }
+  if (t.reason === "target" && tg) {
+    const over = (t.exit / tg - 1) * 100;
+    return over > 0.05 ? `開盤高於停利價 +${over.toFixed(1)}%` : "停利價出場";
+  }
+  if (t.reason === "trail" && tg) return `鎖利後回落出場，高於地板 ${pctTxt((t.exit / tg - 1) * 100, 1)}`;
+  if (t.reason === "time" && tg) return `到期收盤出場，距停利 ${pctTxt((t.exit / tg - 1) * 100, 1)}`;
+  return "";
+}
 function swingTradesTable(rows) {
   // 每格帶 data-v（排序用的原始值）；表頭 data-sort＝num／date／text
   const tr = rows.map((t) => {
@@ -1058,20 +1081,34 @@ function swingTradesTable(rows) {
       : st === "unfilled" ? (SWING_REASON[t.reason] || t.reason) + (t.open_next != null ? `<div class="plan muted">開 ${fmt2(t.open_next)} ≥ 漲停 ${fmt2(t.limit_up)}</div>` : "")
       : SWING_REASON[st];
     const sc = swingScoreCell(t);
+    const rl = t.rules || DB.swing.rules.exit;
+    const lockMode = !!rl.lock_trail_pct;
+    const stopC = swingPlanCell(t.ref_stop, t.stop0 ?? (st === "closed" || st === "open" ? t.stop : null), `−${rl.stop_pct}%`);
+    const tgtPct = t.ref_target_pct ?? rl.target_pct;
+    const tgtC = swingPlanCell(t.ref_target, st === "closed" || st === "open" ? t.target : null,
+      tgtPct != null ? `+${Number(tgtPct).toFixed(0)}%${lockMode ? " 地板" : ""}` : "");
+    const vs = swingVsPlan(t);
+    const ext = (st === "closed" || st === "open") && t.mfe_pct != null
+      ? `<div class="plan muted">最高 ${pctTxt(t.mfe_pct, 1)}｜最低 ${pctTxt(t.mae_pct, 1)}</div>` : "";
     return `<tr class="${st === "unfilled" ? "dim" : ""}" data-tier="${t.tier || ""}">
-      <td class="lf" data-v="${t.code}"><b>${t.code}</b> ${t.name}${tierBadge(t.tier)}<div class="plan muted">${(t.setups || [t.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
+      <td class="lf sticky-col" data-v="${t.code}"><b>${t.code}</b> ${t.name}${tierBadge(t.tier)}<div class="plan muted">${(t.setups || [t.setup]).map((k) => (DB.swing.rules.setups[k] || {}).name || k).join("＋")}</div></td>
       <td data-v="${t.signal_date}">${t.signal_date}</td>
       <td data-v="${sc.v}">${sc.html}</td>
       <td data-v="${t.fill ?? ""}">${t.fill != null ? fmt2(t.fill) : "–"}${t.fill_date && t.fill != null ? `<div class="plan muted">${t.fill_date}</div>` : ""}</td>
+      <td data-v="${stopC.v}">${stopC.html}</td>
+      <td data-v="${tgtC.v}">${tgtC.html}</td>
       <td data-v="${exitV ?? ""}">${exitTxt}</td>
-      <td class="lf" data-v="${reasonKey || ""}">${reason}</td>
+      <td class="lf" data-v="${reasonKey || ""}">${reason}${vs ? `<div class="plan muted">${vs}</div>` : ""}</td>
       <td data-v="${t.days ?? ""}">${t.days != null ? t.days : "–"}</td>
-      <td data-v="${retV ?? ""}">${ret}</td>
+      <td data-v="${retV ?? ""}">${ret}${ext}</td>
       <td data-v="${st === "closed" ? t.net : ""}" class="${st === "closed" ? signCls(t.net) : ""}">${st === "closed" ? signTxt(t.net) + fmt(t.net) : "–"}</td>
     </tr>`;
   }).join("");
   return `<div class="tbl-wrap"><table class="trades sortable">
-    <thead><tr><th class="lf" data-sort="text">股票／型態</th><th data-sort="date">訊號日</th><th data-sort="num" title="建議當時的綜合分（≈＝綜合分上線前的舊訊號，以現行公式回算）">綜合分</th><th data-sort="num">成交</th><th data-sort="num">出場／現價</th><th class="lf" data-sort="text">結果</th><th data-sort="num">持有日</th><th data-sort="num">報酬</th><th data-sort="num">1 張淨損益</th></tr></thead>
+    <thead><tr><th class="lf sticky-col" data-sort="text">股票／型態</th><th data-sort="date">訊號日</th><th data-sort="num" title="建議當時的綜合分（≈＝綜合分上線前的舊訊號，以現行公式回算）">綜合分</th><th data-sort="num">成交</th>
+      <th data-sort="num" title="建議當時卡片上的參考停損（依訊號日收盤 −7%）；下方小字＝依實際成交價計算、實際觸發用的停損">建議停損</th>
+      <th data-sort="num" title="建議當時卡片上的參考停利（舊規則 +15%、第 5 日起）或鎖利地板（新規則，依離高點空間 8～30%）；下方小字＝依實際成交價計算">建議停利／地板</th>
+      <th data-sort="num">出場／現價</th><th class="lf" data-sort="text">結果</th><th data-sort="num">持有日</th><th data-sort="num">報酬</th><th data-sort="num">1 張淨損益</th></tr></thead>
     <tbody>${tr}</tbody></table></div>`;
 }
 function swingPositionsTable(P, EX) {
