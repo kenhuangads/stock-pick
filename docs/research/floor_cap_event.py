@@ -2,7 +2,8 @@
 """單一崩跌事件的「鎖利地板上限」比較：同一批實際取用的單（ledger taken），只換地板上限重算出場；
 另附該事件所有閘門日的全部訊號（層一）。用來在事件結束後，以同口徑檢查現行上限 30% 是否合適。
 
-用法：python docs/research/floor_cap_event.py [事件起始日，預設 2026-11-04]
+用法：python docs/research/floor_cap_event.py [事件起始日，預設 2026-11-04] [--from=YYYY-MM-DD] [--to=YYYY-MM-DD]
+  --from／--to：只取這段期間內的閘門日（例：同一事件裡的第二波崩跌 --from=2026-11-19）。
 輸出：Markdown（表格＋逐筆），印到 stdout。資料只用 repo 內的官方快照與 ledger，不需 3 年資料集。
 仍在持有的單以最新收盤計「未實現」並另列，不混入已實現統計；全部出場前的比較會偏向低上限（低上限較早實現贏家）。"""
 import json
@@ -18,6 +19,8 @@ import twstock  # noqa: E402
 from exitsim import make  # noqa: E402
 
 START = next((a for a in sys.argv[1:] if not a.startswith("--")), "2026-11-04")
+OPT = dict(a[2:].split("=", 1) for a in sys.argv[1:] if a.startswith("--") and "=" in a)
+D_FROM, D_TO = OPT.get("from", "0000-00-00"), OPT.get("to", "9999-99-99")
 cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 scfg = swing.swing_cfg(cfg)
 fees, lots, tax = cfg["fees"], scfg["lots"], scfg["swing_tax"]
@@ -48,7 +51,7 @@ ev = next((e for e in state["events"] if e["start"] == START), None)
 if not ev:
     print(f"找不到起始日 {START} 的事件；現有事件：{[e['start'] for e in state['events']]}")
     sys.exit(1)
-gate_dates = [d["date"] for d in ev["days"]]
+gate_dates = [d["date"] for d in ev["days"] if D_FROM <= d["date"] <= D_TO]
 
 
 def last_close(code):
@@ -98,7 +101,7 @@ cur_rows = run(taken, BASE)
 still = [(d, s, r) for d, s, r in cur_rows if r["status"] == "open"]
 print(f"**現行規則下仍持有：{len(still)} 筆**" + (f"（{'、'.join(s['code'] + ' ' + s['name'] for _, s, _ in still)}）——比較尚未完全同口徑，見文末說明" if still else "——已全部出場，可同口徑比較") + "\n")
 
-for label, sigs in (("實際取用（新出場規則的單）", newrule), ("實際取用（事件全部，含 11/4 舊規則單）", taken), ("當日全部訊號（層一）", allsig)):
+for label, sigs in (("實際取用（新出場規則的單）", newrule), ("實際取用（全部，含舊出場規則的單）", taken), ("當日全部訊號（層一）", allsig)):
     print(f"## {label}\n")
     print("| 規則 | 已出場 | 仍持有 | 已實現合計 | 單筆均 | 勝率 | 平均持有日 | 摸到地板 | 仍持有者未實現（依最新收盤） |")
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
